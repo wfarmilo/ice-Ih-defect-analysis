@@ -1,0 +1,13 @@
+[project]
+name = "icedfmods"
+dependencies = ["numpy", "MDAnalysis", "tqdm", "freud", "scipy"]
+version = "1"
+description = "Package containing tools for defect identification and analysis in ice Ih molecular dynamics trajectories"
+authors = [{ name = "W. A. Farmilo", email = "waf25@cam.ac.uk" }]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ['icedfmods']
