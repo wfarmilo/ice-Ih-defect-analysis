@@ -1,0 +1,9 @@
+# Numpy cached data files
+*.npy
+*.npz
+*cache/
+
+# Figures
+*.svg
+*.pdf
+
