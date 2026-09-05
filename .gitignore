@@ -2,8 +2,11 @@
 *.npy
 *.npz
 *cache/
+__pycache__/
 
 # Figures
 *.svg
 *.pdf
 
+# Module stuff
+*.egg-info
