@@ -2,7 +2,7 @@ import numpy as np
 import MDAnalysis as mda
 from MDAnalysis.analysis import distances as mddist
 from tqdm import tqdm
-import freud as fd
+from freud import box as fdbox, locality as fdloc
 from scipy.optimize import milp, LinearConstraint, Bounds, linear_sum_assignment
 from scipy.sparse import coo_matrix
 
@@ -10,17 +10,16 @@ from scipy.sparse import coo_matrix
 #
 #Unlike Multidefect_tracking_mod.py (which this started as a copy of), the classification below
 #can identify an unbounded number of simultaneous OH-/H3O+/L/D defects per frame, and DefectTracker
-#gives each one a stable identity across frames instead of relying on raw index order (which flips
-#whenever two same-type defects cross in sorted-index order).
+#gives each one a stable identity across frames.
 
 def get_oxyNeighborList(u):
     #Define useful params
     oxy = u.select_atoms('name O')
     No = len(oxy)
-    box = fd.box.Box(*u.dimensions[:3]) #Assumes orthogonal box
+    box = fdbox.Box(*u.dimensions[:3]) #Assumes orthogonal box
     points = oxy.positions
 
-    voro = fd.locality.Voronoi()
+    voro = fdloc.Voronoi()
 
     voro.compute((box, points))
 

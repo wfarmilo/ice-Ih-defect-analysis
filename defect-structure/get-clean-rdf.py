@@ -9,44 +9,65 @@ parser.add_argument("-ff", "--from_file", help = "Key file to read data from", d
 args = parser.parse_args()
 
 import json
-from icedfmods.Defect_tracking import run_multidefect_tracking
 import numpy as np
 import MDAnalysis as mda
+from icedfmods.Structure_identification import get_single_rdf
 from MDAnalysis import transformations as trans
 from pathlib import Path
 import re
-import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+RMIN = 0.5
+RMAX = 6.5
+NBINS = 200
+
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
-def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all):
+def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, rmin, rmax, nbins):
 
     inputmap = [dft, f"{run_num:02d}", T]
     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
     dir_in = data_dir / input_formatted
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
-    HBN_save = out_dir_rich / f'{dir_in.name}-HBN.npz'
-    df_save = out_dir_rich / f'{dir_in.name}-defects.npz'
+
+    rdf_save = out_dir_rich / f'{dir_in.name}-rdf.npz'
 
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and (HBN_save.exists() and df_save.exists()):
+    if not(is_run_all) and rdf_save.exists():
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
 
     # Set up simulation
     u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'dcd')
     u.dimensions = cell_dims
-    u.trajectory.add_transformations(trans.wrap(u.atoms, compound = 'atoms'))
 
-    tis = np.arange(len(u.trajectory))
+    # Set up rdf dict
+    RDFTYPES = ['OO', 'HH', 'OH']
+    rdf_dict =  {rdf_type : np.zeros(nbins) for rdf_type in RDFTYPES}
+    rdf_counts = {rdf_type : 0 for rdf_type in RDFTYPES}
+    rdf_props = {'r_vals' : None, 'rmax' : rmax, 'nbins' : nbins, 'rdftypes' : RDFTYPES}
+    ref_atoms = {name : u.select_atoms(f'name {name}') for name in ['O', 'H']}
+    r_vals = np.zeros(nbins, dtype = int)
 
-    # Track all defects
+    # Get rdfs
     print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
-    df_dict, hbn_dict = run_multidefect_tracking(u, tis, 20, isverbose = False, recalibrate = True)
+
+    # Iterate through rdf types that may be of interest
+    for rdft in RDFTYPES:
+        for ti in range(len(u.trajectory)):
+            u.trajectory[ti]
+            rdf, r_vals = get_single_rdf(u, ref_atoms[rdft[0]].indices, ref_atoms[rdft[1]], rmin, rmax, nbins)
+            rdf_dict[rdft] += rdf
+            rdf_counts[rdft] += 1
+
+    rdf_props['r_vals'] = r_vals
+
+    # Average out all the observed rdfs
+    for key in rdf_dict.keys():
+        if rdf_counts[key] > 0: rdf_dict[key] /= rdf_counts[key]
 
     # Save output
-    np.savez_compressed(HBN_save, **hbn_dict)
-    np.savez_compressed(df_save, **df_dict)
+    rdf_savedict = rdf_dict | rdf_props
+    np.savez_compressed(rdf_save, **rdf_savedict)
 
     # Result is the diagnostic for printing from the executor
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
@@ -66,10 +87,14 @@ def main():
 
     # Iterating variables
     dftypes = runparams["defect_types"]
-    run_idxs = runparams["run_indices"]
 
-    # Use only defect systems
-    if "p0m0" in dftypes: dftypes.remove("p0m0")
+    # Use only clean systems
+    if "p0m0" not in dftypes: 
+        raise(Exception(f"Clean p0m0 system not found in {dftypes}"))
+    else:
+        dftypes = ["p0m0"]
+
+    run_idxs = runparams["run_indices"]
 
     # Simulation variables: not the main thing we want to converge, but different cases of it to compare over
     temps = runparams["temperature"]
@@ -101,7 +126,7 @@ def main():
             # Continue iterating over dependents
             for T in temps:
                 # Save inputs for each given task
-                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all))
+                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all, RMIN, RMAX, NBINS))
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
