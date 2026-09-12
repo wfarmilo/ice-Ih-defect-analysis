@@ -1,6 +1,6 @@
 import argparse
 
-def_keyfile = "./data-cache/CL-production.json"
+def_keyfile = "../data-cache/CL-production.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -43,7 +43,7 @@ pdbin_dir = Path(runparams["pdb_input_dir"])
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory
-out_dir = Path("./data-cache") / runparams["parent_folder"]
+out_dir = Path("../data-cache") / runparams["parent_folder"]
 if not(out_dir.exists()): out_dir.mkdir()
 
 # Prepare the inputs for each run

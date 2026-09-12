@@ -32,7 +32,7 @@ pdbin_dir = Path(runparams["pdb_input_dir"])
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory
-out_dir = Path("./data-cache") / runparams["parent_folder"]
+out_dir = Path("../data-cache") / runparams["parent_folder"]
 if not(out_dir.exists()): out_dir.mkdir()
 
 # Prepare the inputs for each run
@@ -121,7 +121,6 @@ axs[1].legend()
 fig.text(0.5, 0.98, f'T = {T}K, run {run_num:02d}', ha = 'center', va = 'top', fontsize = 25)
 
 # Save figure
-cwd = Path('.')
-figdir = cwd / 'figs-cache'
+figdir = Path('../figs-cache')
 figname = f'rdf-T{T}-{run_num:02d}.svg'
 fig.savefig(figdir / figname)
