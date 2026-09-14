@@ -13,6 +13,11 @@ from scipy.sparse import coo_matrix
 #gives each one a stable identity across frames.
 
 def get_oxyNeighborList(u):
+    """
+    Get neighbourlist of oxygens (in OXYGEN indices) with 
+    neighbours chosen by minimizing a weighted voronoi tessellation
+    to find the most accurate connections possible.
+    """
     #Define useful params
     oxy = u.select_atoms('name O')
     No = len(oxy)
