@@ -94,3 +94,20 @@ def get_single_rdf(u, focus_idxs, reference_group, rmin, rmax, nbins):
     rdf = counts / (shell_volume * pair_density)
 
     return rdf, r_vals
+
+def get_total_dipole(u, PARTIAL_O, PARTIAL_H):
+
+    Nt = len(u.trajectory)
+    oxy = u.select_atoms('name O')
+    hyd = u.select_atoms('name H')
+
+    center = u.dimensions[:3]/2
+
+    dipole = np.zeros((Nt, 3), dtype = float)
+    for ti in range(Nt):
+        u.trajectory[ti]
+
+        for ag, CHARGE in zip([oxy, hyd], [PARTIAL_O, PARTIAL_H]):
+            dipole[ti] += CHARGE * (u.atoms[ag.indices].positions - center[None, :]).sum(axis=0)
+
+    return dipole
