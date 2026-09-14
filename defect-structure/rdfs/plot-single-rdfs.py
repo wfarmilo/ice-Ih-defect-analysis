@@ -89,36 +89,61 @@ for dft in ["p0m0", "p0m1", "p1m0"]:
             for key in props.keys():
                 rdfs_by_defect[key] = rdf_dict[key]
 
+# Plotting params
+plt.rcParams.update({
+    "font.size": 18,
+    "axes.titlesize": 21,
+    "axes.grid": True,
+    "axes.linewidth": 1.25,
+    "xtick.top": True,
+    "ytick.right": True,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.minor.visible": False,
+    "ytick.minor.visible": False,
+    "grid.linestyle": "dashed",
+    "grid.linewidth": 1,
+    "grid.alpha": 0.3,
+    "legend.fontsize": 12
+})
+
 # Just plot one for now
-fig, axs = plt.subplots(2, 2, figsize = (10,10))
-axs = axs.flatten()
+fig, axs = plt.subplots(len(DFTYPES), 2, figsize = (10, 10), sharex = "col", sharey = "row", gridspec_kw = {"hspace" : 0.05, "wspace" : 0.05})
 
-DFTYPES_FMT = [r"$OH^-$", r"$H_3O^+$", r"$L$", r"$D$"]
-for ai in range(axs.size):
-    ax = axs[ai]
+DFTYPES_FMT = [r"$OH^-$", r"$H_3O^+$", r"$L$  ", r"$D$  "]
+for a_row in range(len(DFTYPES)):
+    for a_col in range(2):
+        ax = axs[a_row, a_col]
+        rdftype = ["OO", "OH"][a_col]
 
-    # Plot clean values
-    ax.plot(rdfs_clean["r_vals"], rdfs_clean["OO"], ls = '--', c = 'C0')
-    ax.plot(rdfs_clean["r_vals"], rdfs_clean["OH"], ls = '--', c = 'C1')
+        # Plot clean values
+        ax.plot(rdfs_clean["r_vals"], rdfs_clean[rdftype], lw = 3, ls = '-', c = 'k')
 
-    # Plot defect values
-    ax.plot(rdfs_by_defect["r_vals"], rdfs_by_defect["OO"][DFTYPES[ai]], ls = '-', c = 'C0')
-    ax.plot(rdfs_by_defect["r_vals"], rdfs_by_defect["OH"][DFTYPES[ai]], ls = '-', c = 'C1')
+        # Plot defect values
+        ax.plot(rdfs_by_defect["r_vals"], rdfs_by_defect[rdftype][DFTYPES[a_row]], ls = '-', c = 'r')
 
-    ax.text(0.5, 0.98, DFTYPES_FMT[ai], ha = 'center', va = 'top', fontsize = 20, transform = ax.transAxes)
-    ax.set_xlabel(r'$r [\mathrm{\AA}$]')
-    ax.set_ylabel(r'$g(r)$')
-    ax.set_ylim([0, 10])
+        if a_col == 0: 
+            #ax.text(0.02, 0.98, DFTYPES_FMT[a_row], ha = 'left', va = 'top', transform = ax.transAxes)
+            ax.set_ylabel(DFTYPES_FMT[a_row], rotation = "horizontal", ha = "right", fontsize = 20)
+        ax.set_ylim([-0.1, 7.95])
+        ax.set_yticks(np.arange(0, 7, 2))
+        ax.set_xticks(np.arange(0, rdfs_clean["r_vals"].max()))
 
 # Set up legend
-axs[1].plot([], [], ls = '-', c = 'k', label = f"Clean")
-axs[1].plot([], [], ls = '--', c = 'k', label = f"Defect")
-axs[1].plot([], [], ls = '-', c = 'C0', label = f"O-O rdf")
-axs[1].plot([], [], ls = '-', c = 'C1', label = f"O-H rdf")
-axs[1].legend()
+axs[0, -1].plot([], [], ls = '-', c = 'k', lw = 3, label = f"Clean")
+axs[0, -1].plot([], [], ls = '-', c = 'r', label = f"Defect")
+axs[0, -1].legend()
+
+# Add x labels
+axs[-1, 0].set_xlabel(r'$r [\mathrm{\AA}$]')
+axs[-1, 1].set_xlabel(r'$r [\mathrm{\AA}$]')
+
+# Add column titles
+axs[0, 0].set_title(r'O-O rdf', fontsize = 20)
+axs[0, 1].set_title(r'O-H rdf', fontsize = 20)
 
 # Label figure
-fig.text(0.5, 0.98, f'T = {T}K, run {run_num:02d}', ha = 'center', va = 'top', fontsize = 25)
+fig.text(0.5, 0.98, f'T = {T}K, run {run_num:02d}', ha = 'center', va = 'top')
 
 # Save figure
 figdir = Path('../figs-cache')

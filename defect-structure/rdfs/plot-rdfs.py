@@ -44,7 +44,6 @@ data_dir = Path(runparams["input_dir"])
 
 # Get output directory
 out_dir = Path("../data-cache") / runparams["parent_folder"]
-if not(out_dir.exists()): out_dir.mkdir()
 
 # Prepare the inputs for each run
 DFTYPES = ["OH", "H3O", "L", "D"]
