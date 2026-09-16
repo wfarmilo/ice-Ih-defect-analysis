@@ -4,6 +4,9 @@
 *cache/
 __pycache__/
 
+# Freud stuff
+config/
+
 # Figures
 *.svg
 *.pdf
