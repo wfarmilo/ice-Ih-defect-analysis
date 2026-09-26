@@ -3,15 +3,30 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import distances as mddist
 from tqdm import tqdm
 from freud import box as fdbox, locality as fdloc
+from scipy.optimize import milp, LinearConstraint, Bounds, linear_sum_assignment
+from scipy.sparse import coo_matrix
 
-def raw_oxyNeighbourList(oxy, box, cutoff = 1.0):
+#This builds on the framework of Neighbor_mod.py, but should be more robust (hopefully)
+#
+#Unlike Multidefect_tracking_mod.py (which this started as a copy of), the classification below
+#can identify an unbounded number of simultaneous OH-/H3O+/L/D defects per frame, and DefectTracker
+#gives each one a stable identity across frames.
+
+def get_oxyNeighborList(u):
+    """
+    Get neighbourlist of oxygens (in OXYGEN indices) with 
+    neighbours chosen by minimizing a weighted voronoi tessellation
+    to find the most accurate connections possible.
+    """
+    #Define useful params
+    oxy = u.select_atoms('name O')
     No = len(oxy)
-    fbox = fdbox.Box(*box) #Assumes orthogonal box
+    box = fdbox.Box(*u.dimensions[:3]) #Assumes orthogonal box
     points = oxy.positions
 
     voro = fdloc.Voronoi()
 
-    voro.compute((fbox, points))
+    voro.compute((box, points))
 
     nlist = voro.nlist
 
@@ -20,33 +35,58 @@ def raw_oxyNeighbourList(oxy, box, cutoff = 1.0):
     d = nlist.distances
     w = nlist.weights
 
-    # Make connection matrix
     pairs = np.zeros((No, No), dtype = float)
-    pairs[i, j] = w/d   # Enhanced weighting by inverse distance
+    pairs[i, j] = w/d   #Enhanced weighting by inverse distance
 
-    # Get indices for upper triangular part of pairs
+    #Symmetrize weights (each (i,j) has one maximized w)
+    pairs = np.maximum(pairs, pairs.T)
+
+    #Get indices for upper triangular part of pairs
     iu, ju = np.triu_indices(No, k=1)
 
-    # Keep only bonded pairs with w/d > cutoff
-    valid = pairs[iu, ju] > cutoff
+    #Keep only bonded pairs
+    valid = pairs[iu, ju] > 0
     iu_valid = iu[valid]
     ju_valid = ju[valid]
+    wu_valid = pairs[iu_valid, ju_valid]
+    
+    N_edge = len(wu_valid)
 
-    # Build ragged neighbourlist
-    max_nn = 0
+    #The goal here is to maximize the matrix product weights X keep_bond
+    minimize = -wu_valid
+
+    #Establish contact matrix: contact[Oi, Ek] = 1 if oxygen Oi is on the edge Ek
+    rows = np.concatenate((iu_valid, ju_valid))                     #oxygen index from iu and ju (will end up symmetric)
+    cols = np.concatenate((np.arange(N_edge), np.arange(N_edge)))   #Edge index just increases
+    connected = np.ones(2*N_edge, dtype = int)                      #Value to fill at that point
+    contact = coo_matrix((connected, (rows, cols)), shape = (No, N_edge))
+
+    mustbefour = LinearConstraint(contact, 4, 4)    #Must be between 4 and 4 (so = 4) contacts
+
+    #Set up constraints on my solution x, which tells me to keep (x[k] = 1) or discard (x[k] = 0) bond k
+    bounds = Bounds(0,1)                        # Enforce above, must be between 0 and 1
+    isinteger = np.ones(N_edge, dtype = int)    # Must also be an integer
+
+    result = milp(
+        c = minimize,               #The coefficients to be minimized
+        integrality = isinteger,    #Enforce the solution to be an integer
+        bounds = bounds,            #Enforce the solution to be 0 or 1
+        constraints = mustbefour    #Enforce that each Oi have 4 neighbours
+    )
+
+    assert result.success, result.message
+
+    keep_bond = result.x > 0.5
+
     NNlist = [[] for _ in range(No)]
-    for Oi, Oj in zip(iu_valid, ju_valid):
+
+    for Oi, Oj in zip(iu_valid[keep_bond], ju_valid[keep_bond]):
         NNlist[Oi].append(Oj)
         NNlist[Oj].append(Oi)
-        max_nn = np.max([max_nn, len(NNlist[Oi]), len(NNlist[Oj])])
 
-    for row in NNlist:
-        row.extend((max_nn - len(row)) * [-1])
-
-    NNlist = np.array(NNlist).reshape((No, max_nn))
-
-    return NNlist
-
+    NNind = np.array(NNlist, dtype = int)
+    
+    return NNind
 
 def _find_validjumps(oxy, box, oxyNL, max_NN_hop = 2):
     No = len(oxy)
@@ -95,7 +135,7 @@ def get_hydNeighborList(oxy, hyd, dim, cutoff = 3.0):
 
     return HO_pairs
 
-def get_align_HBNN(u, oxyNL_ragged):
+def get_align_HBNN(u, oxyNL):
     """Creates directed graph out of a given ice universe"""
 
     oxy = u.select_atoms("name O")
@@ -118,8 +158,8 @@ def get_align_HBNN(u, oxyNL_ragged):
     OH_vecs -= box[None, :] * np.rint(OH_vecs/box[None, :])
 
     #O neighbours for each hydrogen
-    NN_O_idx = oxyNL_ragged[hydoxyNL, :]   #shape (Nh, Nn)
-    NN_O_pos = oxy.positions[NN_O_idx] #shape will be (Nh, Nn, 3) for [Hk, Oj, xyz]
+    NN_O_idx = oxyNL[hydoxyNL, :]   #shape (Nh, 4)
+    NN_O_pos = oxy.positions[NN_O_idx] #shape will be (Nh, 4, 3) for [Hk, Oj, xyz]
 
     #For each neighboring Oj, find the OO distance between it and our hydrogen's oxygen Oi
     OO_vecs = NN_O_pos - OH_pos[:, None, :]
@@ -145,20 +185,85 @@ def get_align_HBNN(u, oxyNL_ragged):
 
     best_angles = prod[np.arange(Nh), best_O]
     delta = best_angles - prod[np.arange(Nh), sorted_idx[:, -2]]
+    #avg = np.mean(best_angles)
+    #std = np.std(best_angles)
+
+    #valid = best_angles >= (avg - 2*std)       #Filter only valid bonds
 
 
     accep_O = NN_O_idx[np.arange(Nh), best_O]   #Shape (Nh,)
     donor_O = hydoxyNL                          #Shape (Nh,)
 
-    # Return clean (mostly) 4-coordinated oxyNL from hbond reconstruction
-    oxyNL_clean = np.zeros((No, 4), dtype = int)
-    ii = np.zeros(No, dtype = int)
-    for ao, do in zip(accep_O, donor_O):
-        oxyNL_clean[do, ii[do]] = ao
-        ii[do] += 1
+
+    return donor_O, accep_O, best_angles, delta
+
+def recalibrate_HBNN(u, L_idx, oxyNL, isverbose):
+
+    #Find list of unique indices
+    err_idx = np.unique(np.concatenate((L_idx, oxyNL[L_idx, :].flatten())))
+
+    #Useful params
+    oxy = u.select_atoms("name O")
+    hyd = u.select_atoms("name H")
+    box = u.dimensions[:3]
+    No = len(oxy)
+    Nh = len(hyd)
+
+    err_map = np.zeros(No, dtype = int)
+    err_map[err_idx] = np.arange(len(err_idx))  #Maps oxygen index to err index
+
+    #Find oxygen neighbours by distance
+    dists = mddist.distance_array(oxy[err_idx], oxy, box = u.dimensions)
+    mindist = np.argsort(dists, axis = 1)
+
+    errNL = mindist[:, 1:7]
+
+    #Get hydrogens associated with elements in err
+    hydoxyNL = get_hydNeighborList(oxy, hyd, u.dimensions, cutoff = 3.0)
+
+    err_hyds = np.arange(Nh)[((hydoxyNL[:, None] == err_idx[None, :])).any(axis=1)]    #List of all Hs attached to an O in err
+    err_hydoxy = hydoxyNL[err_hyds]                                                    #List of which O is attached to err_hyds[k]
+    Nh_err = len(err_hyds)                                                             #How many Hs we found (usually 2x len(err_idx), but may be more/less)
+
+    #Find OH vectors
+    OH_pos = oxy[err_hydoxy].positions
+    OH_vecs = hyd[err_hyds].positions - OH_pos
+    OH_vecs -= box[None, :] * np.rint(OH_vecs/box[None, :])
+
+    #Find all O neighbour positions
+    NN_O_idx = errNL[err_map[err_hydoxy], :]
+    NN_O_pos = oxy.positions[NN_O_idx]  #shape will be (Nh_err, 6, 3)
+
+    if isverbose: print('\n'.join([f'{err} : {errN}' for err, errN in zip(oxy[err_idx].indices, oxy.indices[errNL])]))
+
+    #For each neighboring Oj, find the OO distance between it and our hydrogen's oxygen Oi
+    OO_vecs = NN_O_pos - OH_pos[:, None, :]
+    OO_vecs -= box[None, None, :] * np.rint(OO_vecs/box[None, None, :])
+
+    #Normalize
+    OH_vecs /= np.linalg.norm(OH_vecs, axis = -1)[:, None]
+    OO_vecs /= np.linalg.norm(OO_vecs, axis = -1)[:, :, None]
+
+    #Compute dot product
+    #Here, 'ij,ikj->ik' translates as follows:
+    #   i: hydrogen index
+    #   j: dimension index (xyz)
+    #   k: oxygen neighbour index (0..5)
+    # Then, what this sum is doing is for each for each element ij in OH_vecs, it 
+    # adds the element ikj in OO_vecs and stores it in element ik of prod. Thus,
+    # we sum over all of the xyz coordinates j of the product (denoted by ',' here)
+    prod = np.einsum('ij,ikj->ik', OH_vecs, OO_vecs)
+
+    sorted_idx = np.argsort(prod, axis = 1)
+
+    best_O = sorted_idx[:, -1]
+
+    accep_O = NN_O_idx[np.arange(Nh_err), best_O]   #Shape (Nh_err,)
+    donor_O = err_hydoxy                            #Shape (Nh_err,)
+
+    return err_hyds, donor_O, accep_O
 
 
-    return oxyNL_clean, donor_O, accep_O, best_angles, delta
 
 def classify_defects(donor_O, accep_O, oxyNL, bestangles):
     """
@@ -188,7 +293,7 @@ def classify_defects(donor_O, accep_O, oxyNL, bestangles):
 
     #L and D are topological mirrors of each other on the same edge-count structure: L is a missing
     #(0-hydrogen) edge, D is a doubly-occupied (2-hydrogen) edge - see _build_edge_counts.
-    L_pairs, L_anomalies = _find_edge_defects(oind[total_cts <= 3], oxyNL, No, edge_counts, target_count = 0)
+    L_pairs, L_anomalies = _find_edge_defects(oind[total_cts == 3], oxyNL, No, edge_counts, target_count = 0)
     D_pairs, D_anomalies = _find_edge_defects(oind[total_cts >= 5], oxyNL, No, edge_counts, target_count = 2)
 
     #Sort so that if we want to use the localized index we use the first
@@ -321,8 +426,20 @@ def identify_frame_defects(u, oxyNL, donor_O, accep_O, best_angles, recalibrate 
 
     #Get defects from donor counts (ionic) and edge tracking (bjerrum)
     classified, anomalies = classify_defects(donor_O, accep_O, oxyNL, best_angles)
-    located = locate_defect_positions(u, classified)
 
+    #If broken, try a one-shot fix
+    if recalibrate and (anomalies['L'] or anomalies['D']):
+        err_idx = np.array(sorted({i for i, _ in [*anomalies['L'], *anomalies['D']]}), dtype = int)
+        fix_idx, fix_donor, fix_accep = recalibrate_HBNN(u, err_idx, oxyNL, isverbose)
+
+        donor_O = donor_O.copy()
+        accep_O = accep_O.copy()
+        donor_O[fix_idx] = fix_donor
+        accep_O[fix_idx] = fix_accep
+
+        classified, anomalies = classify_defects(donor_O, accep_O, oxyNL, best_angles)
+
+    located = locate_defect_positions(u, classified)
     return located, anomalies
 
 def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, next_id, max_lifetime, uni2oxy):
@@ -492,6 +609,7 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, re
     uni2oxy = np.full(len(u_wrapped.atoms)+1, -1, dtype = int)
     uni2oxy[oxy_STATIC.indices] = np.arange(len(oxy_STATIC))
 
+    oxyNL = get_oxyNeighborList(u_wrapped)
     validjump = _find_validjumps(u_wrapped.select_atoms("name O"), box, oxyNL, max_NN_hop=2)
 
     next_id = {name : 0 for name in DFTYPES}
@@ -511,12 +629,8 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, re
     for i, ts in enumerate(pbar(tis, desc = "Tracking defects")):
         u_wrapped.trajectory[ts]
 
-        # Get ragged oxyNL
-        oxy = u_wrapped.select_atoms("name O")
-        oxyNL_ragged = raw_oxyNeighbourList(oxy, box)
-
-        #Get hydrogen bond neighbour network (and clean oxyNL)
-        oxyNL, donor_O, accep_O, best_angles, _ = get_align_HBNN(u_wrapped, oxyNL_ragged)
+        #Get hydrogen bond neighbour network
+        donor_O, accep_O, best_angles, _ = get_align_HBNN(u_wrapped, oxyNL)
 
         #Note that anomalies here is in oxy indices
         located, anomalies = identify_frame_defects(u_wrapped, oxyNL, donor_O, accep_O, best_angles, recalibrate = recalibrate, isverbose = isverbose)
