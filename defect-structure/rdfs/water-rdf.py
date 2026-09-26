@@ -9,9 +9,9 @@ parser.add_argument("-ff", "--from_file", help = "Key file to read data from", d
 args = parser.parse_args()
 
 import json
+from icedfmods.Structure_identification import get_single_rdf
 import numpy as np
 import MDAnalysis as mda
-from icedfmods.Structure_identification import get_single_rdf
 from MDAnalysis import transformations as trans
 from pathlib import Path
 import re
@@ -29,6 +29,7 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     dir_in = data_dir / input_formatted
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
+    df_file = out_dir_rich / f'{dir_in.name}-defects.npz'
 
     rdf_save = out_dir_rich / f'{dir_in.name}-rdf.npz'
 
@@ -39,26 +40,43 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     # Set up simulation
     u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'dcd')
     u.dimensions = cell_dims
+    u.trajectory.add_transformations(trans.wrap(u.atoms, compound = 'atoms'))
+
+    # Pull defect tracking data (if available)
+    if not(df_file.exists()): 
+        return f'{dft}-{run_num:02d}/{dir_in.name} defect file not found at {df_file.absolute()}'
+    df_dict = np.load(df_file)
 
     # Set up rdf dict
-    RDFTYPES = ['OO', 'HH', 'OH']
-    rdf_dict =  {rdf_type : np.zeros(nbins) for rdf_type in RDFTYPES}
-    rdf_counts = {rdf_type : 0 for rdf_type in RDFTYPES}
-    rdf_props = {'r_vals' : None, 'rmax' : rmax, 'nbins' : nbins, 'rdftypes' : RDFTYPES}
+    DFTYPES = df_dict["type_names"]
+    rdf_dict =  {name + '_H' : np.zeros(nbins) for name in DFTYPES} | \
+                {name + '_O' : np.zeros(nbins) for name in DFTYPES}
+    rdf_counts = {key : 0 for key in rdf_dict.keys()}
+    rdf_props = {'r_vals' : None, 'rmax' : rmax, 'nbins' : nbins, 'DFTYPES' : DFTYPES}
     ref_atoms = {name : u.select_atoms(f'name {name}') for name in ['O', 'H']}
     r_vals = np.zeros(nbins, dtype = int)
 
     # Get rdfs
     print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
 
-    # Iterate through rdf types that may be of interest
-    for rdft in RDFTYPES:
-        for ti in range(len(u.trajectory)):
-            u.trajectory[ti]
-            rdf, r_vals = get_single_rdf(u, ref_atoms[rdft[0]].indices, ref_atoms[rdft[1]], rmin, rmax, nbins)
-            rdf_dict[rdft] += rdf
-            rdf_counts[rdft] += 1
+    # Iterate through every single observed defect
+    Ndf = df_dict['frame'].shape[0]
+    for dfi in range(Ndf):
+        # Get defect properties
+        frame = df_dict['frame'][dfi]
+        name = DFTYPES[df_dict['type'][dfi]]
+        a1 = df_dict['atom'][dfi]
 
+        # Get universe at correct timestep
+        u.trajectory[frame]
+
+        # Find df/O and df/H rdfs
+        for reference in ['O', 'H']:
+            rdf, r_vals = get_single_rdf(u, np.array([a1, -1], dtype = int), ref_atoms[reference], rmin, rmax, nbins)
+            rdf_dict[f'{name}_{reference}'] += rdf
+            rdf_counts[f'{name}_{reference}'] += 1
+
+    # Save last recorded r_vals (all the same)
     rdf_props['r_vals'] = r_vals
 
     # Average out all the observed rdfs
@@ -86,15 +104,11 @@ def main():
     dt = runparams["dt"]
 
     # Iterating variables
+    run_idxs = runparams["run_indices"]
     dftypes = runparams["defect_types"]
 
-    # Use only clean systems
-    if "p0m0" not in dftypes: 
-        raise(Exception(f"Clean p0m0 system not found in {dftypes}"))
-    else:
-        dftypes = ["p0m0"]
-
-    run_idxs = runparams["run_indices"]
+    # Use only defect systems
+    if "p0m0" in dftypes: dftypes.remove("p0m0")
 
     # Simulation variables: not the main thing we want to converge, but different cases of it to compare over
     temps = runparams["temperature"]
@@ -102,8 +116,6 @@ def main():
     # Get input files
     pdbin_dir = Path(runparams["pdb_input_dir"])
     data_dir = Path(runparams["input_dir"])
-
-    pdbin_fmt = runparams["pdb_fmt"]
 
     # Get output directory
     out_dir = Path("../data-cache") / runparams["parent_folder"]
@@ -116,8 +128,8 @@ def main():
 
     for dft in dftypes:
         for run_num in run_idxs:
-            # Get pdb input (determined by pXmY-ZZ)
-            pdbname = re.sub(r'XXX[^X]*XXX', '{}', pdbin_fmt).format(dft, run_num)
+            # Get pdb input (determined by pXmY)
+            pdbname = f"water-{dft}.pdb"
             pdbin = pdbin_dir / pdbname
             ref_dims = mda.Universe(pdbin.absolute()).dimensions # Reference Universe for cell dims
 

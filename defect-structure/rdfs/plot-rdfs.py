@@ -1,10 +1,8 @@
 import argparse
 
-def_keyfile = "../data-cache/CL-production.json"
-
 parser = argparse.ArgumentParser()
-parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
-parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
+parser.add_argument("from_file", help = "Key file to read data paths from", type = str)
+parser.add_argument('temp', help = "Simulation temperature", type = int)
 
 args = parser.parse_args()
 
@@ -17,26 +15,20 @@ import re
 # Collect all rdfs
 
 # Load input params
-run_all = args.all
+T = args.temp
 
 # Load run info
 with open(args.from_file, "r") as f:
     runparams = json.loads(f.read())
 
 # Constant across all run types
-name = runparams["name"]
+rp_name = runparams["name"]
 dt = runparams["dt"]
 
-# Iterating variables
-dftypes = runparams["defect_types"]
-
-dftypes_clean = ["p0m0"]
-assert dftypes_clean[0] in dftypes, f"Defect type p0m0 not found in {dftypes}"
-
+# Variables to iterate over
 run_idxs = runparams["run_indices"]
-
-# Simulation variables: not the main thing we want to converge, but different cases of it to compare over
-temps = runparams["temperature"]
+sim_types = runparams["defect_types"]
+Nr = len(run_idxs)
 
 # Get input locations
 pdbin_dir = Path(runparams["pdb_input_dir"])
@@ -46,7 +38,7 @@ data_dir = Path(runparams["input_dir"])
 out_dir = Path("../data-cache") / runparams["parent_folder"]
 
 # Prepare the inputs for each run
-DFTYPES = ["OH", "H3O", "L", "D"]
+DFTYPES = ["OH", "H3O"] if "water" in rp_name or "ionic" in rp_name else ["OH", "L", "H3O", "D"] # Kinda scuffed flag for only using ionic types
 props = {'r_vals' : None, 'rmax' : None, 'nbins' : None}
 rdfs_by_defect = {
      "OO" : {name : [] for name in DFTYPES},
@@ -56,56 +48,115 @@ rdfs_clean = {
     "OO" : [],
     "OH" : []
 }
-input_map = {"df" : [], "cl" : []}
 
-for dft in dftypes:
+for dft in sim_types:
     for run_num in run_idxs:
         # Find parent directory (pxmY-ZZ)
         out_dir_rich = out_dir / f"{dft}-{run_num:02d}"
 
-        # Continue iterating over dependents
-        for T in temps:
-                inputmap = [dft, f"{run_num:02d}", T]
-                input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
-                run_name = input_formatted.split("/")[-1]
+        inputmap = [dft, f"{run_num:02d}", T]
+        input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
+        run_name = input_formatted.split("/")[-1]
 
-                rdf_save = out_dir_rich / f'{run_name}-rdf.npz'
+        rdf_save = out_dir_rich / f'{run_name}-rdf.npz'
 
-                assert rdf_save.exists(), f'Missing input {rdf_save.absolute()}'
+        assert rdf_save.exists(), f'Missing input {rdf_save.absolute()}'
 
-                rdf_dict = np.load(rdf_save)
+        # Watch out for npz overhead
+        with np.load(rdf_save) as rdf_dict:
 
-                # Split off clean and defect types
-                if dft in dftypes_clean:
-                    rdfs_clean["OO"].append(rdf_dict["OO"])
-                    rdfs_clean["OH"].append(rdf_dict["OH"])
-
-                    # Add to clean lookup
-                    input_map["cl"].append((dft, run_num, T))
+            # Split off clean and defect types
+            match dft:
+                case "p0m0":
+                    rdfs_clean["OO"] = rdf_dict["OO"]
+                    rdfs_clean["OH"] = rdf_dict["OH"]
 
                     # Save overall params (overwritten every time)
                     for key in props.keys():
                         rdfs_clean[key] = rdf_dict[key]
-                else:
-                    assert (rdf_dict["DFTYPES"] == np.array(DFTYPES)).all()
-                    for name in DFTYPES:
+
+                case "p0m1":
+                    for name in set(DFTYPES) & {"OH", "L"}:
                         rdfs_by_defect["OO"][name].append(rdf_dict[f"{name}_O"])
                         rdfs_by_defect["OH"][name].append(rdf_dict[f"{name}_H"])
 
-                    # Add to defect lookup
-                    input_map["df"].append((dft, run_num, T))
+                    # Save overall params (overwritten every time)
+                    for key in props.keys():
+                        rdfs_by_defect[key] = rdf_dict[key]
+
+                case "p1m0":
+                    for name in set(DFTYPES) & {"H3O", "D"}:
+                        rdfs_by_defect["OO"][name].append(rdf_dict[f"{name}_O"])
+                        rdfs_by_defect["OH"][name].append(rdf_dict[f"{name}_H"])
 
                     # Save overall params (overwritten every time)
                     for key in props.keys():
-                        rdfs_clean[key] = rdf_dict[key]
+                        rdfs_by_defect[key] = rdf_dict[key]
 
-# Convert to arrays
-for key in input_map.keys():
-    input_map[key] = np.array(input_map[key], dtype = str)
+# Average across runs
+for rdf_type in ["OO", "OH"]:
+    for name in DFTYPES:
+        runs = rdfs_by_defect[rdf_type][name]
+        rdfs_by_defect[rdf_type][name] = np.mean(np.stack(runs), axis = 0) if runs else None
 
-# Convenience dicts
-NAMETOINP = {
-     "simulation_type" : 0,
-     "run_index" : 1,
-     "temp" : 2
-}
+
+# Plotting params
+plt.rcParams.update({
+    "font.size": 14,
+    "axes.titlesize": 21,
+    "axes.linewidth": 1.25,
+    "xtick.top": True,
+    "ytick.right": True,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.minor.visible": False,
+    "ytick.minor.visible": False,
+    "axes.grid": True,
+    "grid.linestyle": "dashed",
+    "grid.linewidth": 1,
+    "grid.alpha": 0.3,
+    "legend.fontsize": 10,
+    "figure.constrained_layout.use" : True,
+    "lines.dash_capstyle" : "round",
+    "mathtext.default" : "regular"
+})
+
+# Just plot one for now
+fig, axs = plt.subplots(2, len(DFTYPES), figsize = (4 * len(DFTYPES), 10, "cm"), sharey = "row", gridspec_kw = {"hspace" : 0.05, "wspace" : 0})
+
+DFTYPES_FMT = [r"$OH^-$", r"$H_3O^+$", r"$L$  ", r"$D$  "]
+for a_col in range(len(DFTYPES)):
+    for a_row in range(2):
+        ax = axs[a_row, a_col]
+        rdftype = ["OO", "OH"][a_row]
+
+        # Plot clean values
+        ax.plot(rdfs_clean["r_vals"], rdfs_clean[rdftype], lw = 3, ls = '-', c = 'k', alpha = 0.6)
+
+        # Plot defect values
+        ax.plot(rdfs_by_defect["r_vals"], rdfs_by_defect[rdftype][DFTYPES[a_col]], ls = '-', c = 'r', lw = 2)
+
+        # Add defect label
+        offset = 0 if a_row == 0 else 0.1
+        ax.text(0.05 + offset, 0.95, DFTYPES_FMT[a_col], ha = 'left', va = 'top', transform = ax.transAxes)
+
+        # Set y limits
+        ax.set_ylim([-0.1, 7.95])
+        ax.set_yticks(np.arange(0, 7, 2))
+        if a_col == 0: ax.set_ylabel(r'$g_{' + rdftype + r'}(r)$')
+
+        # Set x limits
+        xmin = 2 if a_row == 0 else 0.51
+        ax.set_xlim((xmin, rdfs_clean["r_vals"].max()))
+        ax.set_xticks(np.arange(np.round(xmin), rdfs_clean["r_vals"].max()))
+        if a_row == 1: ax.set_xlabel(r'$r [\mathrm{\AA}$]')
+
+# Set up legend
+axs[0, -1].plot([], [], ls = '-', c = 'k', lw = 3, label = f"Clean", alpha = 0.6)
+axs[0, -1].plot([], [], ls = '-', c = 'r', label = f"Defect")
+axs[0, -1].legend(loc = "upper right")
+
+# Save figure
+figdir = Path('../figs-cache')
+figname = f'rdf-{rp_name}-T{T}.svg'
+fig.savefig(figdir / figname)

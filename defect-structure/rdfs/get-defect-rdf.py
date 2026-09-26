@@ -118,6 +118,8 @@ def main():
     pdbin_dir = Path(runparams["pdb_input_dir"])
     data_dir = Path(runparams["input_dir"])
 
+    pdbin_fmt = runparams["pdb_in"]
+
     # Get output directory
     out_dir = Path("../data-cache") / runparams["parent_folder"]
     if not(out_dir.exists()): out_dir.mkdir()
@@ -130,7 +132,7 @@ def main():
     for dft in dftypes:
         for run_num in run_idxs:
             # Get pdb input (determined by pXmY-ZZ)
-            pdbname = f"{dft}-{run_num:02d}.pdb"
+            pdbname = re.sub(r'XXX[^X]*XXX', '{}', pdbin_fmt).format(dft, run_num)
             pdbin = pdbin_dir / pdbname
             ref_dims = mda.Universe(pdbin.absolute()).dimensions # Reference Universe for cell dims
 
