@@ -13,3 +13,6 @@ config/
 
 # Module stuff
 *.egg-info
+
+# Scrap files
+test-*
