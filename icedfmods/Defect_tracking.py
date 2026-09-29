@@ -3,8 +3,9 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import distances as mddist
 from tqdm import tqdm
 from freud import box as fdbox, locality as fdloc
+from scipy.optimize import linear_sum_assignment
 
-def raw_oxyNeighbourList(oxy, box, cutoff = 1.0):
+def raw_oxyNeighbourList(oxy, box, cutoff = 0):
     No = len(oxy)
     fbox = fdbox.Box(*box) #Assumes orthogonal box
     points = oxy.positions
@@ -27,7 +28,7 @@ def raw_oxyNeighbourList(oxy, box, cutoff = 1.0):
     # Get indices for upper triangular part of pairs
     iu, ju = np.triu_indices(No, k=1)
 
-    # Keep only bonded pairs with w/d > cutoff
+    # Keep only pairs that are actually neighbours with w > cutoff (by default is just 0)
     valid = pairs[iu, ju] > cutoff
     iu_valid = iu[valid]
     ju_valid = ju[valid]
@@ -35,17 +36,24 @@ def raw_oxyNeighbourList(oxy, box, cutoff = 1.0):
     # Build ragged neighbourlist
     max_nn = 0
     NNlist = [[] for _ in range(No)]
+    weights = [[] for _ in range(No)]
     for Oi, Oj in zip(iu_valid, ju_valid):
         NNlist[Oi].append(Oj)
         NNlist[Oj].append(Oi)
         max_nn = np.max([max_nn, len(NNlist[Oi]), len(NNlist[Oj])])
 
-    for row in NNlist:
+        # Add weights
+        weights[Oi].append(pairs[Oi, Oj])
+        weights[Oj].append(pairs[Oj, Oi])   # Same value
+
+    for row, wrow in zip(NNlist, weights):
         row.extend((max_nn - len(row)) * [-1])
+        wrow.extend((max_nn - len(wrow)) * [0])
 
     NNlist = np.array(NNlist).reshape((No, max_nn))
+    weights = np.array(weights).reshape((No, max_nn))
 
-    return NNlist
+    return NNlist, weights
 
 
 def _find_validjumps(oxy, box, oxyNL, max_NN_hop = 2):
@@ -95,7 +103,7 @@ def get_hydNeighborList(oxy, hyd, dim, cutoff = 3.0):
 
     return HO_pairs
 
-def get_align_HBNN(u, oxyNL_ragged):
+def get_hbond_neighbours(u, oxyNL_ragged, weights):
     """Creates directed graph out of a given ice universe"""
 
     oxy = u.select_atoms("name O")
@@ -137,193 +145,143 @@ def get_align_HBNN(u, oxyNL_ragged):
     # Then, what this sum is doing is for each for each element ij in OH_vecs, it 
     # adds the element ikj in OO_vecs and stores it in element ik of prod. Thus,
     # we sum over all of the xyz coordinates j of the product (denoted by ',' here)
-    prod = np.einsum('ij,ikj->ik', OH_vecs, OO_vecs)    #Shape (Nh, 4)
+    prod = np.einsum('ij,ikj->ik', OH_vecs, OO_vecs)    #Shape (Nh, Nn)
 
-    sorted_idx = np.argsort(prod, axis = 1)
+    # Use combined score from voronoi neighbour weighting and angle in order
+    # to filter out really far neighbours
+    NN_weights = weights[hydoxyNL, :]
+    valid = NN_weights > 0
 
+    # Take product at valid sites (mask out invalid ones with impossibly low score)
+    score = np.where(valid, prod * NN_weights, -np.inf)
+
+    # Find best score for each hydrogen
+    sorted_idx = np.argsort(score, axis = 1)
+
+    # Pick out highest score to pair with
     best_O = sorted_idx[:, -1]
 
+    # Save angles for analysis
     best_angles = prod[np.arange(Nh), best_O]
-    delta = best_angles - prod[np.arange(Nh), sorted_idx[:, -2]]
 
-
+    # Build acceptor and donor pairs
     accep_O = NN_O_idx[np.arange(Nh), best_O]   #Shape (Nh,)
     donor_O = hydoxyNL                          #Shape (Nh,)
 
-    # Return clean (mostly) 4-coordinated oxyNL from hbond reconstruction
-    oxyNL_clean = np.zeros((No, 4), dtype = int)
-    ii = np.zeros(No, dtype = int)
-    for ao, do in zip(accep_O, donor_O):
-        oxyNL_clean[do, ii[do]] = ao
-        ii[do] += 1
+    return donor_O, accep_O, best_angles
 
-
-    return oxyNL_clean, donor_O, accep_O, best_angles, delta
-
-def classify_defects(donor_O, accep_O, oxyNL, bestangles):
+def classify_defects(donor_O, accep_O, oxyNL_ragged, bestangles, oxy2uni):
     """
-    Identifies every OH-/H3O+/L/D defect candidate present this frame - no cap on how many of
-    each type may coexist, unlike get_df_HBNN's single-instance-oriented logic.
-
-    Returns (classified, anomalies). classified['OH']/['H3O'] are 1-D oxygen-index arrays;
-    classified['L']/['D'] are (n,2) arrays of oxygen-index pairs flanking each broken (L) or
-    doubly-occupied (D) edge. anomalies flags candidate sites where identification was ambiguous
-    (see _find_edge_defects), so a caller can retry (e.g. via recalibrate_HBNN) instead of
-    silently mispairing or misclassifying.
+    Returns oxygen indices of classified defects as a dict by defect name
     """
-    No = oxyNL.shape[0]
+    No = len(oxyNL_ragged)
     oind = np.arange(No)
 
-    #Robust count of which oxygen is occupied
+    # Counts how many hydrogens each oxygen is donating
     donor_cts = np.bincount(donor_O, minlength = No)
-    accep_cts = np.bincount(accep_O, minlength = No)
-    total_cts = donor_cts + accep_cts
 
-    #Use coordination for ionic
+    # Use coordination for ionic
     OH_idx = oind[donor_cts == 1]
     H3O_idx = oind[donor_cts == 3]
 
-    #Builds oxygen-ordered dict of edges, keyed by No * Oi + Oj 
-    edge_counts = _build_edge_counts(donor_O, accep_O, No)
+    # Stack ionic defects with empty flags to preserve shape
+    OH_idx = np.vstack([OH_idx, np.full(OH_idx.shape, -1, dtype = int)])
+    H3O_idx = np.vstack([H3O_idx, np.full(H3O_idx.shape, -1, dtype = int)])
 
-    #L and D are topological mirrors of each other on the same edge-count structure: L is a missing
-    #(0-hydrogen) edge, D is a doubly-occupied (2-hydrogen) edge - see _build_edge_counts.
-    L_pairs, L_anomalies = _find_edge_defects(oind[total_cts <= 3], oxyNL, No, edge_counts, target_count = 0)
-    D_pairs, D_anomalies = _find_edge_defects(oind[total_cts >= 5], oxyNL, No, edge_counts, target_count = 2)
+    # For Bjerrum, should correspond to incorrect total counds, resolved by reconstructing hbond network
+    L_pairs, D_pairs = find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles)
 
-    #Sort so that if we want to use the localized index we use the first
-    D_pairs_sorted = _reorder_D_pairs(donor_O, accep_O, D_pairs, bestangles)
-
+    # Return dict of defects keyed by name
     classified = {
         'OH': OH_idx,
         'H3O': H3O_idx,
         'L': L_pairs,
-        'D': D_pairs_sorted,
+        'D': D_pairs
     }
-    anomalies = {'L': L_anomalies, 'D': D_anomalies}
 
-    return classified, anomalies
+    return classified
 
+def find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles):
 
-def _build_edge_counts(donor_O, accep_O, No):
-    """
-    Counts how many hydrogens are assigned along each O-O edge, keyed by a direction-independent
-    canonical key (min(i,j)*No + max(i,j)) so a bond i->j and a bond j->i along the same edge count
-    as the same edge rather than two different ones. Every hydrogen contributes exactly 1 to its
-    own edge's count (canon has one entry per hydrogen), so: a normal (singly-occupied) edge has
-    count 1, a missing edge (L-defect: neither flanking oxygen's H points along it) has count 0,
-    and a doubly-occupied edge (the traditional Bjerrum D-defect: both flanking oxygens' hydrogens
-    point at each other along the same O-O axis) has count 2.
-    """
-    a = donor_O.astype(np.int64)
-    b = accep_O.astype(np.int64)
-    edge_key = np.minimum(a, b) * No + np.maximum(a, b) #A bond from a->b == b->a (and has count 2), shape Nh
-    edge_ids, counts = np.unique(edge_key, return_counts = True)
-    return dict(zip(edge_ids.tolist(), counts.tolist()))
+    # Build oxyNL from hbonds
+    edge_da = np.concatenate([donor_O, accep_O])
+    edge_ad = np.concatenate([accep_O, donor_O])
+    order = np.argsort(edge_da)
 
+    # Sort da array first, then match the other atom each is paired with
+    # Example: Given (4,2), (1,3), (2,1), (1,2)
+    # da_sorted: 1 1 2 4
+    # ad_sorted: 3 2 2 4 (not necessarily in increasing order!)
+    da_sorted, ad_sorted = edge_da[order], edge_ad[order]
+    _, bounds = np.unique(da_sorted, return_index = True)   # First occurence of each oxygen in da
+    bounds = np.concatenate([bounds, [len(da_sorted)]])   # Pad in last element for entry No
 
-def _find_edge_defects(candidates, oxyNL, No, edge_counts, target_count):
-    """
-    For each candidate oxygen, finds which of its 4 oxyNL neighbours sits on an edge with exactly
-    `target_count` hydrogens assigned (0 = missing/L-defect, 2 = doubly-occupied/D-defect)
-    A candidate with zero or 2+ matching neighbours is ambiguous and reported
-    instead of guessed at.
-    """
-    pairs = []
-    seen_edges = set()
-    anomalies = []
+    oxyNL_bondcounts = bounds[1:] - bounds[:-1]     # Should have length No
+    oxyNL_bonds = [ad_sorted[bounds[o]:bounds[o + 1]] for o in range(No)]
 
-    for Oi in candidates:
-        Oi = int(Oi)
-        matches = [int(Oj) for Oj in oxyNL[Oi]  #Check neighbours of Oi
-                   if edge_counts.get(min(Oi, int(Oj)) * No + max(Oi, int(Oj)), 0) == target_count] #Only flag as match if the edge count is our target (if not found, is 0)
+    # Identify defect rows
+    L_rows = np.arange(No)[oxyNL_bondcounts < 4]
+    D_rows = np.arange(No)[oxyNL_bondcounts > 4]
 
-        if len(matches) == 1:
-            #Label the edge sorted by index (permutation-invariant)
-            edge = (min(Oi, matches[0]), max(Oi, matches[0]))
-            #Both oxygens flanking a defect edge satisfy the same coordination filter, so this
-            #edge is typically found once from each end - only keep it once.
-            if edge not in seen_edges:
-                seen_edges.add(edge)
-                pairs.append(edge)
-        else:
-            #If more than 1 edge defect on a site, report it
-            anomalies.append((Oi, matches))
+    # D defect: Find the doubled bond in oxyNL_bonds
+    duped_symmetric_keys = []
+    for dr in D_rows:
+        seen = set()
+        duplicates = list({i for i in oxyNL_bonds[dr] if i in seen or seen.add(i)})   # Either add to list or add to seen
+        keys = [min(dr, dup) * No + max(dr, dup) for dup in duplicates]
 
-    #Return pairs (if they exist) and anomalies
-    pairs_arr = np.array(pairs, dtype = int) if pairs else np.full((0,2), -1, dtype = int)
-    return pairs_arr, anomalies
+        duped_symmetric_keys.extend(keys)
 
-def _reorder_D_pairs(donor_O, accep_O, D_pairs, bestangles):
-    """
-    Reorders D defect pairs so that the first entry is the one which would be identified as a 
-    single D defect site if we use the oxygen site definition instead of the bond definition.
-    """
+    # Then, we pair D defects by checking which symmetric keys are duplicated
+    seen = set()
+    dupes = np.array({i for i in duped_symmetric_keys if i in seen or seen.add(i)})
 
-    D_pairs_sorted = []
-    for pair in D_pairs:
-        #D_pairs is guaranteed sorted by lowest index -> highest index by construction
+    D_pairs = []
+
+    # Sort by worst angle then best angle (for atomwise def'n)
+    for dup in dupes:
+        pair = np.array([dup // No, dup % No], dtype = int)
+
+        # Guaranteed sorted by lowest index -> highest index by construction
         first = (donor_O == pair[0]) * (accep_O == pair[1])
         second = (donor_O == pair[1]) * (accep_O == pair[0])
 
-        #If we have a double donating/accepting D defect, kill it (artifact from oxyNL issues)
+        # Skip pairs who double-donate or double-receive
         if not(first.any()) or not(second.any()):
             continue
 
+        # Find angles for both cases
         angs = [bestangles[first][0], bestangles[second][0]]
 
         #Smallest angs value is dangling H-bond
         sortinds = np.argsort(angs)
 
-        D_pairs_sorted.append(pair[sortinds])
+        # Assign to D_pairs
+        D_pairs.append(pair[sortinds])
 
-    return D_pairs_sorted
+    # Turn into array
+    D_pairs = np.array(D_pairs)
 
-def locate_defect_positions(u, classified):
-    """
-    Converts classify_defects' positional oxygen/hydrogen indices into real universe atom indices
-    and PBC-aware positions, one entry per candidate - not one PBC-blended average per type like
-    the old get_dfpos, which collapses multiple simultaneous same-type defects into a single
-    position that corresponds to neither of them.
-    """
-    oxy = u.select_atoms("name O")
-    hyd = u.select_atoms("name H")
-    box = u.dimensions[:3]
+    # L defect: find which oxygen is missing in oxyNL_bonds from both sides
+    duped_symmetric_keys = []
+    for lr in L_rows:
 
-    located = {'OH': [], 'H3O': [], 'L': [], 'D': []}
+        # Neighbouring oxygens who weren't connected by hbond network are up for grabs
+        candidates = set(oxyNL_ragged[lr]) - set(oxyNL_bonds[lr])
 
-    for name in ('OH', 'H3O'):
-        for i in classified[name]:
-            located[name].append(((int(oxy[i].index), -1), oxy[i].position.copy()))
+        # Make symmetric keys between lr and each candidate it could bond to
+        keys = [min(lr, cd) * No + max(lr, cd) for cd in candidates]
+        duped_symmetric_keys.extend(keys)
 
-    #L and D are both flanking-oxygen-pair edges (missing/doubly-occupied respectively) - same
-    #midpoint-of-edge position convention for both.
-    for name in ('L', 'D'):
-        for i, j in classified[name]:
-            vec = get_dist_pbc(oxy[i].position, oxy[j].position, box)
-            midpoint = oxy[i].position + vec / 2.0
-            located[name].append(((int(oxy[i].index), int(oxy[j].index)), midpoint))
+    # Look for duplicate keys (matched pairs)
+    seen = set()
+    dupes = np.array({i for i in duped_symmetric_keys if i in seen or seen.add(i)})
 
-    return located
+    L_pairs = np.empty((len(dupes), 2))
+    L_pairs[:, 0] = (dupes // No).astype(int)
+    L_pairs[:, 1] = dupes % No
 
-
-def identify_frame_defects(u, oxyNL, donor_O, accep_O, best_angles, recalibrate = True, isverbose = False):
-    """
-    Runs one frame's full identification pipeline: build the HBNN, classify all candidates, check
-    for and patch any stale oxyNL rows near this frame's candidates (see _find_stale_oxyNL_rows;
-    oxyNL is patched in place, so a fix persists for every later frame the caller passes the same
-    array to - not just this one), then (once) retry via recalibrate_HBNN for any L site whose
-    missing edge is still ambiguous after that - generalizing multidefect_tracking.py's old
-    `len(L_idx) > 2`-triggered recalibration (which always re-solved the whole current L_idx set)
-    to fire only on the specific sites that are actually ambiguous, correctly scoped for any number
-    of concurrent defects.
-    """
-
-    #Get defects from donor counts (ionic) and edge tracking (bjerrum)
-    classified, anomalies = classify_defects(donor_O, accep_O, oxyNL, best_angles)
-    located = locate_defect_positions(u, classified)
-
-    return located, anomalies
+    return L_pairs, D_pairs
 
 def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, next_id, max_lifetime, uni2oxy):
 
@@ -412,7 +370,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
         possible_sources[:, resolved_old] = False   #No other outputs can take this source
 
     # Fallback: leftover ambiguity the count-based peel couldn't break (e.g. a symmetric tie) gets
-    # resolved by nearest hop-distance, same escalation DefectTracker._step_type uses.
+    # resolved by nearest hop-distance
     remaining_new = np.nonzero(possible_sources.any(axis = 1))[0]
     remaining_old = np.nonzero(possible_sources.any(axis = 0))[0]
     if remaining_new.size and remaining_old.size:
@@ -475,7 +433,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
     return new_trackids, next_id, all_lifetimes
 
 
-def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, recalibrate = True):
+def run_multidefect_tracking(u_wrapped, tis, max_lifetime, RMAX = 5.0, isverbose = False):
     """
     Uses identify_frame_defects over a whole trajectory, which are then matched to previous
     existing defect tracks with match_defects.
@@ -485,15 +443,16 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, re
     """
     pbar = tqdm if isverbose else __empty__
 
+    # Build defect types and universe
     DFTYPES = ['OH', 'H3O', 'L', 'D']
     oxy_STATIC = u_wrapped.select_atoms("name O")
     box = u_wrapped.dimensions[:3]
 
+    # Build mapping from oxygen indices to universe indices
     uni2oxy = np.full(len(u_wrapped.atoms)+1, -1, dtype = int)
     uni2oxy[oxy_STATIC.indices] = np.arange(len(oxy_STATIC))
 
-    validjump = _find_validjumps(u_wrapped.select_atoms("name O"), box, oxyNL, max_NN_hop=2)
-
+    # Initialize empty outputs
     next_id = {name : 0 for name in DFTYPES}
     old_idxs = {name : np.zeros((0,2), dtype = int) for name in DFTYPES}
     old_trackids = {name : np.zeros((0,), dtype = int) for name in DFTYPES}
@@ -513,13 +472,13 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, re
 
         # Get ragged oxyNL
         oxy = u_wrapped.select_atoms("name O")
-        oxyNL_ragged = raw_oxyNeighbourList(oxy, box)
+        oxyNL_ragged, oxyNL_weights = raw_oxyNeighbourList(oxy, box)
 
-        #Get hydrogen bond neighbour network (and clean oxyNL)
-        oxyNL, donor_O, accep_O, best_angles, _ = get_align_HBNN(u_wrapped, oxyNL_ragged)
+        # Get hydrogen bond neighbour network
+        donor_O, accep_O, best_angles, _ = get_hbond_neighbours(u_wrapped, oxyNL_ragged, oxyNL_weights)
 
-        #Note that anomalies here is in oxy indices
-        located, anomalies = identify_frame_defects(u_wrapped, oxyNL, donor_O, accep_O, best_angles, recalibrate = recalibrate, isverbose = isverbose)
+        # Locate and classify all defects 
+        classified = classify_defects(donor_O, accep_O, oxyNL_ragged, best_angles, oxy2uni)
 
         #Save HBN info
         hyd = u_wrapped.select_atoms("name H")
@@ -532,31 +491,23 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, isverbose = False, re
         HBN_ang_save[i, :] = best_angles
 
         for type_code, name in enumerate(DFTYPES):
+
+            # Rebuild validjump from bond network
+            validjump = mddist.capped_distance(oxy[classified[name].flatten()], oxy, min_cutoff=0.01, max_cutoff=RMAX)
+            
             #Extract useful data
-            if located[name]:
-                idx_pairs, positions = zip(*located[name])
-                new_idxs = np.array(idx_pairs, dtype = int)
-                positions = np.array(positions)
-            else:
-                new_idxs = np.full((0,2), -1, dtype = int)
-                positions = np.full((0,3), -1.0, dtype = float)
+            new_idxs = classified[name] if classified[name].size > 0 else np.full((0,2), -1, dtype = int)
 
             #Assign each dftype to a track index
             new_trackids[name], next_id[name], old_lifetimes[name] = match_defects(validjump, new_idxs, old_idxs[name], old_trackids[name], old_lifetimes[name], next_id[name], max_lifetime, uni2oxy)
 
             #Save output (not positions - depends on the way we identify D defects)
-            for track_id, (atom1, atom2), pos in zip(new_trackids[name], new_idxs, positions):
+            for track_id, (atom1, atom2) in zip(new_trackids[name], new_idxs):
                 dfsave.append((ts, track_id, type_code, atom1, atom2))
 
             #Update track indices
             old_idxs[name] = new_idxs
             old_trackids[name] = new_trackids[name]
-        
-
-        if isverbose and anomalies['D']:
-            print(f"\nFrame {ts}: {len(anomalies['D'])} ambiguous D-candidate site(s) skipped: {anomalies['D']}")
-        if isverbose and anomalies['L']:
-            print(f"\nFrame {ts}: {len(anomalies['L'])} ambiguous L-candidate site(s) after recalibration: {anomalies['L']}")
 
     #Build dictionary outputs from ragged list
     frame, track_id, type_code, atom1, atom2 = zip(*dfsave) if dfsave else ([], [], [], [], [])
