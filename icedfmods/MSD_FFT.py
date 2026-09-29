@@ -31,7 +31,7 @@ def msd_fft_1d(r):
         S1[m]=Q/(N-m)       #Divide by N-m to get delta
     return S1-2*S2          #Subtract 2*autocorrelation for a given lag time m (middle term in |<r(t)> - <r(0)>|^2)
 
-def get_fft_msd(defect, unwrapped, box = False):
+def get_fft_msd(defect, unwrapped = False, box = None):
     """ 
     Xavi's method for finding the MSD using a Fast Fourier Transform from Kara's library. Currently only works for 1 defect/timestep.
     
@@ -76,13 +76,32 @@ def unwrap_defect(defect, box):
 
     return df
 
-def fill_frames():
+def get_frame_positions(u, name, frames, atom1, atom2):
     """
-    Method to fill in frames where defects are not found. 
-    TODO: If no defect, what happens?
-        (a) assume it is still, then pick up next trackid
-        (b) only plot diffusions for frames where it exists
-        (c) third option...
+    Method to fill in frames where defects, and extract their positions when found
     """
 
-    return
+    Nt = len(u.trajectory)
+    box = u.dimensions[:3]
+    pos = np.zeros((Nt, 3), dtype = float)
+
+    # Works since frames is increasing by construction
+    frame_lens = np.concatenate(([frames[0]], frames[1:] - frames[:-1], [Nt - frames[-1]]))
+
+    indices = np.vstack([atom1, atom2])
+    indices_Nt = np.repeat(indices, frame_lens, axis = 0)
+
+    for ti in range(Nt):
+        u.trajectory[ti]
+        idxs = indices_Nt[ti]
+        idxs = idxs[idxs > 0]
+
+        if name != "L":
+            pos[ti, :] = u.atoms[idxs[0]].position
+        else:
+            a1 = u.atoms[idxs[0]].position
+            a2 = u.atoms[idxs[1]].position
+            dist = a2 - a1
+            dist -= box * np.rint(dist/box)
+            pos[ti, :] = a1 + dist/2
+    return pos
