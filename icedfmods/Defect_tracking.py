@@ -271,7 +271,7 @@ def build_validjump_single(u_frame, df, RMAX):
         if np.count_nonzero(row_mask) == 0:
             continue
 
-        pairs, dists = mddist.capped_distance(oxy[row[row_mask]], oxy, min_cutoff=0.01, max_cutoff=RMAX, box=u_frame.dimensions, return_distances=True)
+        pairs, dists = mddist.capped_distance(oxy[row[row_mask]], oxy, max_cutoff=RMAX, box=u_frame.dimensions, return_distances=True)
         unique, counts = np.unique(pairs[:, 0], return_counts = True)
 
         order = np.lexsort([dists, pairs[:, 0]])
@@ -429,7 +429,7 @@ def match_defects(u, new_idxs, old_idxs, old_trackids, old_lifetimes, next_id, m
 
         masked_dist = np.where(inhop, allowed_hops_dist, np.inf)    # Shape (N_unassigned, N_atoms, N_Neighbours)
         closest_dist = masked_dist.min(axis=(1, 2))                             # Compact down to (N_unassigned,)
-        neighbour_rank = np.where(issource, masked_dist, np.inf)
+        neighbour_rank = np.where(issource, closest_dist, np.inf)
 
         winner = np.argmin(neighbour_rank)
         new_trackids[unassigned[winner]] = tid
