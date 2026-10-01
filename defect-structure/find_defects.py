@@ -92,7 +92,7 @@ def main():
     for dft in dftypes:
         for run_num in run_idxs:
             # Get pdb input (determined by pXmY-ZZ)
-            pdbname = re.sub(r'XXX[^X]*XXX', '{}', pdbin_fmt).format(dft, run_num)
+            pdbname = re.sub(r'XXX[^X]*XXX', '{}', pdbin_fmt).format(dft, f"{run_num:02d}")
             pdbin = pdbin_dir / pdbname
             ref_dims = mda.Universe(pdbin.absolute()).dimensions # Reference Universe for cell dims
 
