@@ -23,7 +23,7 @@ def raw_oxyNeighbourList(oxy, box, cutoff = 0):
 
     # Make connection matrix
     pairs = np.zeros((No, No), dtype = float)
-    pairs[i, j] = w/d   # Enhanced weighting by inverse distance
+    pairs[i, j] = w
 
     # Get indices for upper triangular part of pairs
     iu, ju = np.triu_indices(No, k=1)
@@ -54,37 +54,6 @@ def raw_oxyNeighbourList(oxy, box, cutoff = 0):
     weights = np.array(weights).reshape((No, max_nn))
 
     return NNlist, weights
-
-
-def _find_validjumps(oxy, box, oxyNL, max_NN_hop = 2):
-    No = len(oxy)
-
-    validjump = [set([i]) for i in range(No)]
-    jumplists = []
-
-    for i in range(No):
-        for n in range(max_NN_hop):
-            neighbours = oxyNL[list(validjump[i])].flatten()
-            validjump[i] |= set(neighbours.tolist())
-
-        #Cast back to arr for easy indexing
-        jumplist = np.array(list(validjump[i]), dtype = int)
-
-        #Sort by distance from source
-        dists = np.linalg.norm(get_dist_pbc(oxy.positions[i], oxy.positions[jumplist], box), axis = -1)
-        jumplists.append(jumplist[np.argsort(dists)])
-
-    #Per-oxygen reachable-neighbor counts aren't guaranteed equal (depends on local ring
-    #structure, especially near a defect), so pad to a common width with -1 instead of assuming
-    #a rectangular shape.
-    max_len = max(len(j) for j in jumplists)
-    padded = np.full((No, max_len), -1, dtype = int)
-    for i, j in enumerate(jumplists):
-        padded[i, :len(j)] = j
-
-    #Stored as (No+1, N_neighbors), last row is for -1 flags
-    return np.vstack([padded, -1 * np.ones((1, max_len), dtype = int)])
-
 
 def get_hydNeighborList(oxy, hyd, dim, cutoff = 3.0):
 
@@ -153,7 +122,7 @@ def get_hbond_neighbours(u, oxyNL_ragged, weights):
     valid = NN_weights > 0
 
     # Take product at valid sites (mask out invalid ones with impossibly low score)
-    score = np.where(valid, prod * NN_weights, -np.inf)
+    score = np.where(valid, prod * np.sqrt(NN_weights), -np.inf)
 
     # Find best score for each hydrogen
     sorted_idx = np.argsort(score, axis = 1)
@@ -185,18 +154,18 @@ def classify_defects(donor_O, accep_O, oxyNL_ragged, bestangles, oxy2uni):
     H3O_idx = oind[donor_cts == 3]
 
     # Stack ionic defects with empty flags to preserve shape
-    OH_idx = np.vstack([OH_idx, np.full(OH_idx.shape, -1, dtype = int)])
-    H3O_idx = np.vstack([H3O_idx, np.full(H3O_idx.shape, -1, dtype = int)])
+    OH_idx = np.vstack([OH_idx, np.full(OH_idx.shape, -1, dtype = int)]).T
+    H3O_idx = np.vstack([H3O_idx, np.full(H3O_idx.shape, -1, dtype = int)]).T
 
     # For Bjerrum, should correspond to incorrect total counds, resolved by reconstructing hbond network
     L_pairs, D_pairs = find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles)
 
     # Return dict of defects keyed by name
     classified = {
-        'OH': OH_idx,
-        'H3O': H3O_idx,
-        'L': L_pairs,
-        'D': D_pairs
+        'OH': oxy2uni[OH_idx],
+        'H3O': oxy2uni[H3O_idx],
+        'L': oxy2uni[L_pairs],
+        'D': oxy2uni[D_pairs]
     }
 
     return classified
@@ -234,7 +203,7 @@ def find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles):
 
     # Then, we pair D defects by checking which symmetric keys are duplicated
     seen = set()
-    dupes = np.array({i for i in duped_symmetric_keys if i in seen or seen.add(i)})
+    dupes = np.array(list({i for i in duped_symmetric_keys if i in seen or seen.add(i)}))
 
     D_pairs = []
 
@@ -260,7 +229,7 @@ def find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles):
         D_pairs.append(pair[sortinds])
 
     # Turn into array
-    D_pairs = np.array(D_pairs)
+    D_pairs = np.array(D_pairs, dtype = int)
 
     # L defect: find which oxygen is missing in oxyNL_bonds from both sides
     duped_symmetric_keys = []
@@ -275,29 +244,78 @@ def find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles):
 
     # Look for duplicate keys (matched pairs)
     seen = set()
-    dupes = np.array({i for i in duped_symmetric_keys if i in seen or seen.add(i)})
+    dupes = np.array(list({i for i in duped_symmetric_keys if i in seen or seen.add(i)}))
 
-    L_pairs = np.empty((len(dupes), 2))
+    L_pairs = np.empty((len(dupes), 2), dtype = int)
     L_pairs[:, 0] = (dupes // No).astype(int)
     L_pairs[:, 1] = dupes % No
 
     return L_pairs, D_pairs
 
-def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, next_id, max_lifetime, uni2oxy):
+def build_validjump_single(u_frame, df, RMAX):
+    """
+    Find the valid atoms which could conceivably have jumped to the defect position
+    returns in the same shape as df arraw input with extra N_neighbours dimension, computed row-wise
+    df is of shape (N_defects, N_atoms/defect)
+    """
+
+    oxy = u_frame.select_atoms("name O")
+    save = [[] for _ in range(df.shape[1])]
+    max_len = 1
+
+    # Loop over all atom pairs and stack them- here "row" is a given atom coord
+    for ri, row in enumerate(df.T):
+        row_mask = row >= 0
+
+        # Skip if empty (should be true for ionic defects)
+        if np.count_nonzero(row_mask) == 0:
+            continue
+
+        pairs, dists = mddist.capped_distance(oxy[row[row_mask]], oxy, min_cutoff=0.01, max_cutoff=RMAX, box=u_frame.dimensions, return_distances=True)
+        unique, counts = np.unique(pairs[:, 0], return_counts = True)
+
+        order = np.lexsort([dists, pairs[:, 0]])
+        pairs_s = pairs[order, :]
+
+        ischanged = np.concatenate(([True], pairs_s[1:, 0] != pairs_s[:-1, 0], [True]))
+        changed_ind = np.nonzero(ischanged)[0]
+        spacing = changed_ind[1:] - changed_ind[:-1]
+
+        counter = np.concatenate([np.arange(cgd) for cgd in spacing])
+
+        max_len = max(np.max(counts), max_len)
+
+        save[ri] = [pairs, counter, dists]
+
+
+    out = np.full((df.shape[0], df.shape[1], max_len), -1, dtype = int)
+    out_dists = np.full((df.shape[0], df.shape[1], max_len), np.inf, dtype = float)
+
+    for ri, row in enumerate(df.T):
+
+        if not(save[ri]): continue
+
+        pairs, counter, dists = save[ri]
+
+        out[pairs[:, 0], ri, counter] = pairs[:, 1]
+        out_dists[pairs[:, 0], ri, counter] = dists
+
+    return out, out_dists
+
+def match_defects(u, new_idxs, old_idxs, old_trackids, old_lifetimes, next_id, max_lifetime, uni2oxy, RMAX):
 
     N_new = len(new_idxs)
     N_old = len(old_idxs)
-    N_neighbours = validjump.shape[-1]
 
     #Output: new ids for each oxygen
     new_trackids = np.full(N_new, -1, dtype = int)
 
     #Array of valid candidates for each old atom (in oxygen indices)
-    allowed_hops = validjump[uni2oxy[old_idxs], :]   #Shape N_old, N_atoms, N_neighbours
+    allowed_idx, allowed_dist = build_validjump_single(u, old_idxs, RMAX)  #Shape N_old, N_atoms, N_neighbours
 
     #Boolean of possible sources for each atom
     possible_sources = np.zeros((N_new, N_old), dtype = bool)
-    distance_sources = np.full((N_new, N_old), N_neighbours, dtype = int)
+    distance_sources = np.full((N_new, N_old), np.inf, dtype = float)   # Large sentinel value
 
     #Indexes (in new/old_idxs)
     Old, New = np.meshgrid(np.arange(N_old), np.arange(N_new))
@@ -306,13 +324,14 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
     for ni in range(N_new):
         mask_idxs = new_idxs[ni, :] >= 0
         new_uni_idx = uni2oxy[new_idxs[ni, mask_idxs]]  #Shape N_atoms (2 or 1)
-        inhop = (new_uni_idx[None, :, None] == allowed_hops) + (new_uni_idx[None, ::-1, None] == allowed_hops) #shape (N_old, N_atoms, N_neghbours)
-        issource = inhop.any(axis=(1,2))                            #shape N_old
-        closest_neighbour = np.argmax(inhop.any(axis=1), axis = 1)  #shape N_old, indexing N_neighbours (.any() collapses N_atoms, argmax finds first True among neighbours)
-        neighbour_rank = np.where(issource, closest_neighbour, N_neighbours)    #Where issource, output closest_neighbour value otherwise use large flag N_neighbours
+        inhop = (new_uni_idx[None, :, None] == allowed_idx) + (new_uni_idx[None, ::-1, None] == allowed_idx) #shape (N_old, N_atoms, N_neghbours)
+        issource = inhop.any(axis=(1,2))        # Collapse to N_old checking if a given old atom is a source
+        
+        masked_dist = np.where(inhop, allowed_dist, np.inf)
+        closest_dist = masked_dist.min(axis=(1, 2))                       # real minimum distance
 
         possible_sources[ni] = issource
-        distance_sources[ni] = neighbour_rank
+        distance_sources[ni] = closest_dist
 
     #Locate singly sourced and singly received
     source_count = np.count_nonzero(possible_sources, axis = 1) #shape N_new, number of sources per new output
@@ -330,6 +349,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
     #Assign more complicated pairs
     resolved = [True]
     while np.count_nonzero(resolved) > 0:
+
         #Get source/receive counts
         source_count = np.count_nonzero(possible_sources, axis = 1) #shape N_new, number of sources per new output
         output_count = np.count_nonzero(possible_sources, axis = 0) #shape N_old, number of outputs per old source
@@ -342,7 +362,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
             break
 
         #Resolve shared output overlap
-        closest_by_output = np.where(oneside, distance_sources, N_neighbours)   #masked array of shape (N_new, N_old) with distance ranks filled in where one-sided pairs exist
+        closest_by_output = np.where(oneside, distance_sources, np.inf)         #masked array of shape (N_new, N_old) with distance values filled in where one-sided pairs exist
         winner_by_output = np.argmin(closest_by_output, axis = 0)               #Find closest paired output for each source (shape N_old)
         source_winner_ispaired = oneside.any(axis = 0)                          #Per source, is any output trying to pair with it
 
@@ -351,7 +371,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
         source_winners[winner_by_output[source_winner_ispaired], np.arange(N_old)[source_winner_ispaired]] = True   #Now each source has at most one output paired with it
 
         #Resolve shared source overlap
-        closest_by_source = np.where(source_winners, distance_sources, N_neighbours) #masked array of shape (N_new, N_old) with distance ranks filled in where we have source winners
+        closest_by_source = np.where(source_winners, distance_sources, np.inf)  #masked array of shape (N_new, N_old) with distance ranks filled in where we have source winners
         winner_by_source = np.argmin(closest_by_source, axis = 1)               #Find closest paired source for each output (shape N_new)
         output_winner_ispaired = source_winners.any(axis = 1)                   #Per output, is there a source trying to pair with it
 
@@ -374,8 +394,13 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
     remaining_new = np.nonzero(possible_sources.any(axis = 1))[0]
     remaining_old = np.nonzero(possible_sources.any(axis = 0))[0]
     if remaining_new.size and remaining_old.size:
+        # Get cross product (all possible pairs) of remaining outputs
         sub_possible = possible_sources[np.ix_(remaining_new, remaining_old)]
-        sub_cost = np.where(sub_possible, distance_sources[np.ix_(remaining_new, remaining_old)], N_neighbours + 1)
+
+        # Fill in distance based cost (sentinel np.inf)
+        sub_cost = np.where(sub_possible, distance_sources[np.ix_(remaining_new, remaining_old)], np.inf)
+
+        # Match by distance weighting for those who still need matching
         row_ind, col_ind = linear_sum_assignment(sub_cost)
         keep = sub_possible[row_ind, col_ind]
         new_trackids[remaining_new[row_ind[keep]]] = old_trackids[remaining_old[col_ind[keep]]]
@@ -391,7 +416,7 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
             break
 
         remaining_idxs = new_idxs[unassigned]                       #Shape (N_unassigned, 2)
-        allowed_hops_cand = validjump[uni2oxy[remaining_idxs], :]   #Shape (N_unassigned, 2, N_neighbours)
+        allowed_hops_cand, allowed_hops_dist = build_validjump_single(u, remaining_idxs, RMAX)   #Shape (N_unassigned, 2, N_neighbours)
 
         idx_arr = np.asarray(idx)
         stale_uni_idx = uni2oxy[idx_arr[idx_arr >= 0]]              #Shape (1,) or (2,), masked real atoms only
@@ -402,8 +427,9 @@ def match_defects(validjump, new_idxs, old_idxs, old_trackids, old_lifetimes, ne
         if not issource.any():
             continue
 
-        closest_neighbour = np.argmax(inhop.any(axis=1), axis=1)    #Shape (N_unassigned,)
-        neighbour_rank = np.where(issource, closest_neighbour, N_neighbours)
+        masked_dist = np.where(inhop, allowed_hops_dist, np.inf)    # Shape (N_unassigned, N_atoms, N_Neighbours)
+        closest_dist = masked_dist.min(axis=(1, 2))                             # Compact down to (N_unassigned,)
+        neighbour_rank = np.where(issource, masked_dist, np.inf)
 
         winner = np.argmin(neighbour_rank)
         new_trackids[unassigned[winner]] = tid
@@ -451,6 +477,7 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, RMAX = 5.0, isverbose
     # Build mapping from oxygen indices to universe indices
     uni2oxy = np.full(len(u_wrapped.atoms)+1, -1, dtype = int)
     uni2oxy[oxy_STATIC.indices] = np.arange(len(oxy_STATIC))
+    oxy2uni = np.concatenate([oxy_STATIC.indices, [-1]])
 
     # Initialize empty outputs
     next_id = {name : 0 for name in DFTYPES}
@@ -475,7 +502,7 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, RMAX = 5.0, isverbose
         oxyNL_ragged, oxyNL_weights = raw_oxyNeighbourList(oxy, box)
 
         # Get hydrogen bond neighbour network
-        donor_O, accep_O, best_angles, _ = get_hbond_neighbours(u_wrapped, oxyNL_ragged, oxyNL_weights)
+        donor_O, accep_O, best_angles = get_hbond_neighbours(u_wrapped, oxyNL_ragged, oxyNL_weights)
 
         # Locate and classify all defects 
         classified = classify_defects(donor_O, accep_O, oxyNL_ragged, best_angles, oxy2uni)
@@ -492,14 +519,11 @@ def run_multidefect_tracking(u_wrapped, tis, max_lifetime, RMAX = 5.0, isverbose
 
         for type_code, name in enumerate(DFTYPES):
 
-            # Rebuild validjump from bond network
-            validjump = mddist.capped_distance(oxy[classified[name].flatten()], oxy, min_cutoff=0.01, max_cutoff=RMAX)
-            
             #Extract useful data
             new_idxs = classified[name] if classified[name].size > 0 else np.full((0,2), -1, dtype = int)
 
             #Assign each dftype to a track index
-            new_trackids[name], next_id[name], old_lifetimes[name] = match_defects(validjump, new_idxs, old_idxs[name], old_trackids[name], old_lifetimes[name], next_id[name], max_lifetime, uni2oxy)
+            new_trackids[name], next_id[name], old_lifetimes[name] = match_defects(u_wrapped, new_idxs, old_idxs[name], old_trackids[name], old_lifetimes[name], next_id[name], max_lifetime, uni2oxy, RMAX)
 
             #Save output (not positions - depends on the way we identify D defects)
             for track_id, (atom1, atom2) in zip(new_trackids[name], new_idxs):

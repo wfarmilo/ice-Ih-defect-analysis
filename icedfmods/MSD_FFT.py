@@ -88,12 +88,12 @@ def get_frame_positions(u, name, frames, atom1, atom2):
     # Works since frames is increasing by construction
     frame_lens = np.concatenate(([frames[0]], frames[1:] - frames[:-1], [Nt - frames[-1]]))
 
-    indices = np.vstack([atom1, atom2])
-    indices_Nt = np.repeat(indices, frame_lens, axis = 0)
+    indices = np.vstack([atom1, atom2]).T   # Shape (Nf, 2)
+    indices_Nt = np.repeat(indices, frame_lens, axis = 0)   # Shape (Nt, 2)
 
     for ti in range(Nt):
         u.trajectory[ti]
-        idxs = indices_Nt[ti]
+        idxs = indices_Nt[ti, :]
         idxs = idxs[idxs > 0]
 
         if name != "L":
