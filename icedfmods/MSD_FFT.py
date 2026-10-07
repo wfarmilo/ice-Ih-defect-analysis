@@ -76,9 +76,11 @@ def unwrap_defect(defect, box):
 
     return df
 
-def get_frame_positions(u, name, frames, atom1, atom2):
+def extend_all_frame_positions(u, name, frames, atom1, atom2):
     """
-    Method to fill in frames where defects, and extract their positions when found
+    Method to fill in frames where defects, and extract their positions when found.
+    Will extend the defect to fill the entire trajectory, irrespective of the actual
+    fraction of the simulation it occupies.
     """
 
     Nt = len(u.trajectory)
@@ -105,3 +107,39 @@ def get_frame_positions(u, name, frames, atom1, atom2):
             dist -= box * np.rint(dist/box)
             pos[ti, :] = a1 + dist/2
     return pos
+
+def fill_frame_positions(u, name, frames, atom1, atom2):
+    """
+    Method to fill in frames where defects, and extract their positions when found.
+    Will extend the defect to fill between frames[0] and frames[-1], NOT the entire
+    universe trajectory
+    """
+
+    t0 = frames[0]
+    tf = frames[-1]
+    Nt = tf - t0
+    frame_range = np.arange(t0, tf)
+    box = u.dimensions[:3]
+    pos = np.zeros((Nt, 3), dtype = float)
+
+    # Works since frames is increasing by construction
+    frame_lens = np.concatenate((frames[1:] - frames[:-1], [1]))
+
+    indices = np.vstack([atom1, atom2]).T   # Shape (Nf, 2)
+
+    indices_Nt = np.repeat(indices, frame_lens, axis = 0)   # Shape (Nt, 2)
+
+    for ti in range(Nt):
+        u.trajectory[ti]
+        idxs = indices_Nt[ti, :]
+        idxs = idxs[idxs >= 0]
+
+        if name != "L":
+            pos[ti, :] = u.atoms[idxs[0]].position
+        else:
+            a1 = u.atoms[idxs[0]].position
+            a2 = u.atoms[idxs[1]].position
+            dist = a2 - a1
+            dist -= box * np.rint(dist/box)
+            pos[ti, :] = a1 + dist/2
+    return frame_range, pos

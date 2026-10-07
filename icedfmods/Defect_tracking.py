@@ -103,8 +103,15 @@ def get_hbond_neighbours(u, oxyNL_ragged, weights):
     OO_vecs -= box[None, None, :] * np.rint(OO_vecs/box[None, None, :])
 
     #Normalize
-    OH_vecs /= np.linalg.norm(OH_vecs, axis = -1)[:, None]
-    OO_vecs /= np.linalg.norm(OO_vecs, axis = -1)[:, :, None]
+    OH_norm = np.linalg.norm(OH_vecs, axis = -1)[:, None]
+    OO_norm = np.linalg.norm(OO_vecs, axis = -1)[:, :, None]
+
+    # Guarded against self interaction (which does happen but is filtered away in next step)
+    OH_norm[OH_norm == 0] = -1
+    OO_norm[OO_norm == 0] = -1
+
+    OH_vecs /= OH_norm
+    OO_vecs /= OO_norm
 
     #Compute dot product
     #Here, 'ij,ikj->ik' translates as follows:

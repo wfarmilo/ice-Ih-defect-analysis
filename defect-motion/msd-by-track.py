@@ -9,7 +9,7 @@ parser.add_argument("-ff", "--from_file", help = "Key file to read data from", d
 args = parser.parse_args()
 
 import json
-from icedfmods.Defect_tracking import run_multidefect_tracking
+from icedfmods.MSD_FFT import get_fft_msd, fill_frame_positions
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis import transformations as trans
@@ -25,27 +25,73 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     dir_in = data_dir / input_formatted
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
-    HBN_save = out_dir_rich / f'{dir_in.name}-HBN.npz'
-    df_save = out_dir_rich / f'{dir_in.name}-defects.npz'
+    df_path = out_dir_rich / f'{dir_in.name}-defects.npz'
+    msd_savepath = out_dir_rich / f'{dir_in.name}-msd.npz'
 
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and (HBN_save.exists() and df_save.exists()):
+    if not(is_run_all) and msd_savepath.exists():
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
 
     # Set up simulation
     u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'dcd')
     u.dimensions = cell_dims
-    u.trajectory.add_transformations(trans.wrap(u.atoms, compound = 'atoms'))
 
-    tis = np.arange(len(u.trajectory))
+    # Get COM
+    COM = np.zeros((len(u.trajectory), 3))
+    for ti, ts in enumerate(u.trajectory):
+        COM[ti, :] = u.atoms.center_of_mass()
 
-    # Track all defects
+    # Get all defect types
+    df_dict = np.load(df_path)
+    DFTYPES = df_dict["type_names"]
+    tids = {name : [] for name in DFTYPES}
+
+    # Initialize save list
+    msdsave = []
+
+    # Find all msd's
     print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
-    df_dict, hbn_dict = run_multidefect_tracking(u, tis, LIFETIME, RMAX, isverbose = False, )
+
+    for type_code, name in enumerate(DFTYPES):
+        mask_by_name = df_dict["type"] == type_code
+        tids[name] = np.unique(df_dict["track_id"][mask_by_name])
+        for tid in tids[name]:
+            mask_by_tid = (df_dict["track_id"] == tid) * mask_by_name
+
+            # Build continuous trajectory out of frames
+            frames, positions = fill_frame_positions(u, name, df_dict["frame"][mask_by_tid], df_dict["atom1"][mask_by_tid], df_dict["atom2"][mask_by_tid])
+            pos_shifted = positions - COM[frames, :]
+
+            # Skip empty results (single frame defects)
+            if pos_shifted.shape[0] == 0: 
+                continue
+
+            msd = get_fft_msd(pos_shifted, unwrapped = True, box = u.dimensions[:3])
+
+            # Add total x,y,z contributions to msd save
+            msd3d = np.sum(msd, axis = 1)
+
+            # Build huge list of individual values to compress to .npz
+            t0 = frames[0]
+            for tau, msdval in enumerate(msd3d):
+                msdsave.append((tid, type_code, t0, tau, msdval))
+
+    # Refactor msd_dict- now contains each tid within the dftype, as well as a list of all tids under ["OH"]["track_ids"]
+    track_ids, type_codes, t0s, taus, msdval3d = zip(*msdsave) if msdsave else ([], [], [], [], [])
+
+    # Build dict
+    msd_dict = {
+        "track_id" : np.array(track_ids, dtype = int),
+        "type" : np.array(type_codes, dtype = int),
+        "t0" : np.array(t0s, dtype = int),
+        "tau" : np.array(taus, dtype = int),
+        "msd" : np.array(msdval3d, dtype = float),
+        "type_names" : DFTYPES
+    }
+    
 
     # Save output
-    np.savez_compressed(HBN_save, **hbn_dict)
-    np.savez_compressed(df_save, **df_dict)
+    np.savez_compressed(msd_savepath, **msd_dict)
 
     # Result is the diagnostic for printing from the executor
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
@@ -80,8 +126,7 @@ def main():
     pdbin_fmt = runparams["pdb_fmt"]
 
     # Get output directory
-    out_dir = Path("./data-cache") / runparams["parent_folder"]
-    if not(out_dir.exists()): out_dir.mkdir()
+    out_dir = Path("../defect-structure/data-cache") / runparams["parent_folder"]
 
     # Prepare the inputs for each run
 
@@ -101,7 +146,6 @@ def main():
 
             # Make parent directory (pxmY-ZZ)
             out_dir_rich = out_dir / f"{dft}-{run_num:02d}"
-            if not(out_dir_rich.exists()): out_dir_rich.mkdir()
 
             # Continue iterating over dependents
             for T in temps:
