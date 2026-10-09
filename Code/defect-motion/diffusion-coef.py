@@ -5,7 +5,6 @@ def_keyfile = DATA_CACHE / "templates/CL-production.json"
 def_savefile = FIGS_CACHE / "CL-production/Diffusion-CL.svg"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
 parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
 parser.add_argument("-o", "--output", help = "Where to save figure", default = def_savefile, type = str)
 
@@ -24,7 +23,6 @@ MIN_TAU = 50        # The minimum required max lag time (tau) for a run to contr
 def main():
 
     # Load input params
-    run_all = args.all
     fig_savepath = Path(args.output).absolute()
 
     # Load run info
