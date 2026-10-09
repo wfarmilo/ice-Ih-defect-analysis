@@ -1,4 +1,5 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
 parser = argparse.ArgumentParser()
 parser.add_argument("from_file", help = "Key file to read data paths from", type = str)
@@ -35,7 +36,7 @@ pdbin_dir = Path(runparams["pdb_input_dir"])
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory
-out_dir = Path("../data-cache") / runparams["parent_folder"]
+out_dir = DATA_CACHE / runparams["parent_folder"]
 
 # Prepare the inputs for each run
 DFTYPES = ["OH", "H3O"] if "water" in rp_name or "ionic" in rp_name else ["OH", "L", "H3O", "D"] # Kinda scuffed flag for only using ionic types
@@ -157,6 +158,7 @@ axs[0, -1].plot([], [], ls = '-', c = 'r', label = f"Defect")
 axs[0, -1].legend(loc = "upper right")
 
 # Save figure
-figdir = Path('../figs-cache')
+figdir = FIGS_CACHE
 figname = f'rdf-{rp_name}-T{T}.svg'
-fig.savefig(figdir / figname)
+(figdir / runparams["parent_folder"]).mkdir(parents = True, exist_ok = True)
+fig.savefig(figdir / f'{runparams["parent_folder"]}/{figname}')

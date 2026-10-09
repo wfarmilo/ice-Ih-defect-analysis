@@ -6,8 +6,9 @@ each timestep in a given simulation.
 """
 
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE
 
-def_keyfile = "../data-cache/CL-production.json"
+def_keyfile = DATA_CACHE / "templates/CL-production.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("from_file", help = "Key file to read data from", default = def_keyfile, type = str)
@@ -52,4 +53,4 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
 
 
 if __name__ == '__main__':
-    submit_parallel_processes(args, Path('../data-cache'), run_single_file)
+    submit_parallel_processes(args, DATA_CACHE, run_single_file)

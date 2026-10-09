@@ -8,10 +8,11 @@ of the directed hydrogen bonds
 """
 
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("from_file", help = 'JSON file that points to dataset to read for defect analysis. Output will be saved to data-cache/visualizations')
+parser.add_argument("from_file", help = 'JSON file that points to dataset to read for defect analysis. Output will be saved to /ice-Ih-defect-analysis/data-cache/parent-name/visualizations')
 
 args = parser.parse_args()
 
@@ -40,7 +41,7 @@ pdbin_dir = Path(runparams["pdb_input_dir"])
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory
-out_dir = Path("../data-cache") / runparams["parent_folder"]
+out_dir = DATA_CACHE / runparams["parent_folder"]
 
 for dft in dftypes:
     # Get pdb input (determined by pXmY-ZZ)

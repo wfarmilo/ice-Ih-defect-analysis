@@ -1,7 +1,8 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
-def_keyfile = "./data-cache/bead-convergence.json"
-def_plotfile = "./figs-cache/plot-bead-convergence.json"
+def_keyfile = DATA_CACHE / "templates/bead-convergence.json"
+def_plotfile = FIGS_CACHE / "templates/plot-bead-convergence.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -45,7 +46,7 @@ inputdir_raw = runparams["input_dir"]
 
 # Get output directory
 parent_dir = runparams["parent_folder"]
-out_dir = Path("./data-cache") / parent_dir
+out_dir = DATA_CACHE / parent_dir
 assert out_dir.exists(), f"Directory {out_dir.absolute()} not found. Running from {Path(".").absolute()}"
 
 DFTYPES = ["OH", "H3O"]#, "L", "D"]
@@ -72,7 +73,7 @@ for dft in dftypes:
                     inputs = (dft, f"{run_num:02d}", pit, T, P)
                     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputs)
 
-                    gyr_filein = cwd / f'data-cache/{parent_dir}/{input_formatted}-gyration-radius.npz'
+                    gyr_filein = out_dir / f'{input_formatted}-gyration-radius.npz'
 
                     gyr_dict = np.load(gyr_filein)
 
@@ -215,4 +216,5 @@ for ai, ap in enumerate(AXIS_PARAMS):
     current = ax.get_ylim()
     ax.set_ylim(current[0], max([current[1], 0.09]))
 
-fig.savefig(cwd / f'figs-cache/ionic-{run_name}-gyration.svg')
+(FIGS_CACHE / parent_dir).mkdir(parents = True, exist_ok = True)
+fig.savefig(FIGS_CACHE / f'{parent_dir}/ionic-{run_name}-gyration.svg')

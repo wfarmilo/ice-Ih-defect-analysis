@@ -1,6 +1,7 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
-def_keyfile = "./data-cache/bead-convergence.json"
+def_keyfile = DATA_CACHE / "templates/bead-convergence.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -47,7 +48,7 @@ pdb_count = runparams["pdb_atom_count"]
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory
-out_dir = Path("./data-cache") / runparams["parent_folder"]
+out_dir = DATA_CACHE / runparams["parent_folder"]
 
 # Find the inputs for each run
 
@@ -133,4 +134,5 @@ for di, dft in enumerate(dftypes):
             if di == 0: ax.set_ylabel(r"$\langle U - U_{CL} \rangle$")
             ax.legend()
 
-fig.savefig(cwd / f'figs-cache/{run_name}-potential.svg')
+(FIGS_CACHE / runparams["parent_folder"]).mkdir(parents = True, exist_ok = True)
+fig.savefig(FIGS_CACHE / f'{runparams["parent_folder"]}/{run_name}-potential.svg')

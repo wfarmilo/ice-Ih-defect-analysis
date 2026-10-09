@@ -4,8 +4,9 @@ my systems are polarizing themselves (and if it is affected by system size)
 """
 
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
-def_keyfile = "../data-cache/CL-production.json"
+def_keyfile = DATA_CACHE / "templates/CL-production.json"
 
 parser = argparse.ArgumentParser()
 
@@ -45,7 +46,7 @@ pdbin_dir = Path(runparams["pdb_input_dir"])
 data_dir = Path(runparams["input_dir"])
 
 # Get output directory for data
-out_dir = Path("../data-cache") / runparams["parent_folder"]
+out_dir = DATA_CACHE / runparams["parent_folder"]
 
 # Lookup for data masking
 data = np.zeros([len(dftypes), len(run_idxs), len(temps)], dtype = object)
@@ -105,5 +106,6 @@ for ai, ax in enumerate(axs.flatten()):
     ax.legend()
 
 # Save figure
-fig_savefolder = Path('../figs-cache')
-fig.savefig(fig_savefolder / f'{name}-central-dipole.svg')
+fig_savefolder = FIGS_CACHE
+(fig_savefolder / runparams["parent_folder"]).mkdir(parents = True, exist_ok = True)
+fig.savefig(fig_savefolder / f'{runparams["parent_folder"]}/{name}-central-dipole.svg')

@@ -1,6 +1,7 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE
 
-def_keyfile = "./data-cache/water-production.json"
+def_keyfile = DATA_CACHE / "templates/water-production.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -79,7 +80,7 @@ def main():
     pdbin_fmt = runparams["pdb_fmt"]
 
     # Get output directory
-    out_dir = Path("./data-cache") / runparams["parent_folder"]
+    out_dir = DATA_CACHE / runparams["parent_folder"]
     if not(out_dir.exists()): out_dir.mkdir()
 
     # Prepare the inputs for each run

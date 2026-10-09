@@ -8,6 +8,11 @@ from pathlib import Path
 import MDAnalysis as mda
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Parent directory for entire repo
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DATA_CACHE = ROOT_DIR / "data-cache"
+FIGS_CACHE = ROOT_DIR / "figs-cache"
+
 
 def submit_parallel_processes(args, cachePath, run_single_file):
     """

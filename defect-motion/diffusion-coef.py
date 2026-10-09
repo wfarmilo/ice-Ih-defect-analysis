@@ -1,7 +1,8 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
-def_keyfile = "../data-cache/CL-production.json"
-def_savefile = "../figs-cache/Diffusion-CL.svg"
+def_keyfile = DATA_CACHE / "templates/CL-production.json"
+def_savefile = FIGS_CACHE / "CL-production/Diffusion-CL.svg"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -48,7 +49,7 @@ def main():
     data_dir = Path(runparams["input_dir"])
 
     # Get output directory
-    out_dir = Path("../defect-structure/data-cache") / runparams["parent_folder"]
+    out_dir = DATA_CACHE / runparams["parent_folder"]
 
     # Prepare the inputs for each run
 
@@ -168,6 +169,7 @@ def main():
         ax.set_xlabel(r"$T$ [K]")
         ax.text(0.05, 0.95, dfnametolbl[name], color = clrs[name], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 21)
 
+    fig_savepath.parent.mkdir(parents = True, exist_ok = True)
     fig.savefig(fig_savepath)
 
 

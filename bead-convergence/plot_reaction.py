@@ -1,7 +1,8 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
-def_keyfile = "./data-cache/bead-convergence.json"
-def_plotfile = "./figs-cache/plot-bead-convergence.json"
+def_keyfile = DATA_CACHE / "templates/bead-convergence.json"
+def_plotfile = FIGS_CACHE / "templates/plot-bead-convergence.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("plot_style", help = "JSON file to read plotting style from", default = def_plotfile, type = str)
@@ -49,7 +50,7 @@ inputdir_raw = runparams["input_dir"]
 
 # Get output directory
 parent_dir = runparams["parent_folder"]
-out_dir = Path("./data-cache") / parent_dir
+out_dir = DATA_CACHE / parent_dir
 assert out_dir.exists(), f"Directory {out_dir.absolute()} not found. Running from {Path(".").absolute()}"
 
 inputmap = []
@@ -64,8 +65,8 @@ for dft in dftypes:
                     inputs = (dft, f"{run_num:02d}", pit, T, P)
                     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputs)
 
-                    deltas_filein = cwd / f'data-cache/{parent_dir}/{input_formatted}-delta-coord.npz'
-                    d_sums_filein = cwd / f'data-cache/{parent_dir}/{input_formatted}-summed-coord.npz'
+                    deltas_filein = out_dir / f'{input_formatted}-delta-coord.npz'
+                    d_sums_filein = out_dir / f'{input_formatted}-summed-coord.npz'
 
                     delta_dict = np.load(deltas_filein)
                     d_sum_dict = np.load(d_sums_filein)
@@ -277,4 +278,5 @@ for style in styles:
             current = ax.get_ylim()
             ax.set_ylim(max([current[0], -0.15]), min([current[1], 2]))
 
-fig.savefig(cwd / f'figs-cache/{plot_style_full["figsave"]}.svg')
+(FIGS_CACHE / parent_dir).mkdir(parents = True, exist_ok = True)
+fig.savefig(FIGS_CACHE / f'{parent_dir}/{plot_style_full["figsave"]}.svg')

@@ -1,6 +1,7 @@
 import argparse
+from icedfmods.Helper_modules import DATA_CACHE
 
-def_keyfile = "./data-cache/bead-convergence.json"
+def_keyfile = DATA_CACHE / "templates/bead-convergence.json"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
@@ -145,7 +146,7 @@ def main():
     data_dir = Path(runparams["input_dir"])
 
     # Get output directory
-    out_dir = Path("./data-cache") / runparams["parent_folder"]
+    out_dir = DATA_CACHE / runparams["parent_folder"]
     assert out_dir.exists(), f"Directory {out_dir.absolute()} not found. Running from {Path(".").absolute()}"
 
     # Prepare the inputs for each run
