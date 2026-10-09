@@ -17,6 +17,9 @@ from pathlib import Path
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Which defects to use midpoint position for
+MIDPOINT_DEFECT = ["L"]
+
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
 def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, LIFETIME, RMAX):
 
@@ -59,14 +62,14 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
             mask_by_tid = (df_dict["track_id"] == tid) * mask_by_name
 
             # Build continuous trajectory out of frames
-            frames, positions = fill_frame_positions(u, name, df_dict["frame"][mask_by_tid], df_dict["atom1"][mask_by_tid], df_dict["atom2"][mask_by_tid])
+            frames, positions = fill_frame_positions(u, name, df_dict["frame"][mask_by_tid], df_dict["atom1"][mask_by_tid], df_dict["atom2"][mask_by_tid], MIDPOINT_DEFECT)
             pos_shifted = positions - COM[frames, :]
 
             # Skip empty results (single frame defects)
-            if pos_shifted.shape[0] == 0: 
+            if pos_shifted.shape[0] == 0:
                 continue
 
-            msd = get_fft_msd(pos_shifted, unwrapped = True, box = u.dimensions[:3])
+            msd = get_fft_msd(pos_shifted, unwrapped = False, box = u.dimensions[:3])
 
             # Add total x,y,z contributions to msd save
             msd3d = np.sum(msd, axis = 1)

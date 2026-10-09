@@ -200,58 +200,61 @@ def find_network_defects(No, donor_O, accep_O, oxyNL_ragged, bestangles):
     D_rows = np.arange(No)[oxyNL_bondcounts > 4]
 
     # D defect: Find the doubled bond in oxyNL_bonds
-    duped_symmetric_keys = []
+    symmetric_keys = []
     for dr in D_rows:
-        seen = set()
-        duplicates = list({i for i in oxyNL_bonds[dr] if i in seen or seen.add(i)})   # Either add to list or add to seen
-        keys = [min(dr, dup) * No + max(dr, dup) for dup in duplicates]
-
-        duped_symmetric_keys.extend(keys)
+        keys = [min(dr, nn) * No + max(dr, nn) for nn in oxyNL_ragged[dr] if nn >= 0]
+        symmetric_keys.extend(keys)
 
     # Then, we pair D defects by checking which symmetric keys are duplicated
     seen = set()
-    dupes = np.array(list({i for i in duped_symmetric_keys if i in seen or seen.add(i)}))
+    dupes = np.array(list({i for i in symmetric_keys if i in seen or seen.add(i)}))
 
     D_pairs = []
 
-    # Sort by worst angle then best angle (for atomwise def'n)
+    # Sort to put atomic D defect first (for atomwise def'n)
     for dup in dupes:
         pair = np.array([dup // No, dup % No], dtype = int)
 
-        # Guaranteed sorted by lowest index -> highest index by construction
+        # Are the defects donating to each other?
         first = (donor_O == pair[0]) * (accep_O == pair[1])
         second = (donor_O == pair[1]) * (accep_O == pair[0])
 
-        # Skip pairs who double-donate or double-receive
-        if not(first.any()) or not(second.any()):
-            continue
+        # Check nature of defect
+        if first.any() != second.any():     # Bond goes one-way (not doubled)
+            # If first -> second, put pairs[0] first, otherwise the opposite
+            sortinds = [0,1] if first.any() else [1,0]
 
-        # Find angles for both cases
-        angs = [bestangles[first][0], bestangles[second][0]]
+        elif first.any():                   # Bond goes both ways (first and second are both True at one pt)
+            # Find worst angles for both oxygens
+            angs = [np.min(bestangles[first]), np.min(bestangles[second])]
+            
+            #Smallest angs value is dangling H-bond
+            sortinds = np.argsort(angs)
 
-        #Smallest angs value is dangling H-bond
-        sortinds = np.argsort(angs)
+        else:
+            # Fallback, just use smaller index first
+            sortinds = [0,1]                
 
-        # Assign to D_pairs
+        # Assign to D_pairs in order
         D_pairs.append(pair[sortinds])
 
     # Turn into array
-    D_pairs = np.array(D_pairs, dtype = int)
+    D_pairs = np.array(D_pairs, dtype = int).reshape((-1, 2))   # Preserve (0,2) shape for null result
 
     # L defect: find which oxygen is missing in oxyNL_bonds from both sides
-    duped_symmetric_keys = []
+    symmetric_keys = []
     for lr in L_rows:
 
         # Neighbouring oxygens who weren't connected by hbond network are up for grabs
-        candidates = set(oxyNL_ragged[lr]) - set(oxyNL_bonds[lr])
+        candidates = {nn for nn in oxyNL_ragged[lr] if nn >= 0} - set(oxyNL_bonds[lr])
 
         # Make symmetric keys between lr and each candidate it could bond to
         keys = [min(lr, cd) * No + max(lr, cd) for cd in candidates]
-        duped_symmetric_keys.extend(keys)
+        symmetric_keys.extend(keys)
 
     # Look for duplicate keys (matched pairs)
     seen = set()
-    dupes = np.array(list({i for i in duped_symmetric_keys if i in seen or seen.add(i)}))
+    dupes = np.array(list({i for i in symmetric_keys if i in seen or seen.add(i)}))
 
     L_pairs = np.empty((len(dupes), 2), dtype = int)
     L_pairs[:, 0] = (dupes // No).astype(int)

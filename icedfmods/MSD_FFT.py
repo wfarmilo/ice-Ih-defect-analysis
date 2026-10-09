@@ -108,11 +108,13 @@ def extend_all_frame_positions(u, name, frames, atom1, atom2):
             pos[ti, :] = a1 + dist/2
     return pos
 
-def fill_frame_positions(u, name, frames, atom1, atom2):
+def fill_frame_positions(u, name, frames, atom1, atom2, MIDPOINT_DEFECT = ["L"]):
     """
     Method to fill in frames where defects, and extract their positions when found.
     Will extend the defect to fill between frames[0] and frames[-1], NOT the entire
-    universe trajectory
+    universe trajectory. Will use atom1 positions for all defects, unless their name
+    is present in MIDPOINT_DEFECT (default ["L"]) in which case the pbc-aware 
+    midpoint between atom1 and atom2 will be considered.
     """
 
     t0 = frames[0]
@@ -129,17 +131,17 @@ def fill_frame_positions(u, name, frames, atom1, atom2):
 
     indices_Nt = np.repeat(indices, frame_lens, axis = 0)   # Shape (Nt, 2)
 
-    for ti in range(Nt):
-        u.trajectory[ti]
+    for ti, ts in enumerate(np.arange(t0, tf)):
+        u.trajectory[ts]
         idxs = indices_Nt[ti, :]
         idxs = idxs[idxs >= 0]
 
-        if name != "L":
-            pos[ti, :] = u.atoms[idxs[0]].position
-        else:
+        if name in MIDPOINT_DEFECT:
             a1 = u.atoms[idxs[0]].position
             a2 = u.atoms[idxs[1]].position
             dist = a2 - a1
             dist -= box * np.rint(dist/box)
             pos[ti, :] = a1 + dist/2
+        else:
+            pos[ti, :] = u.atoms[idxs[0]].position
     return frame_range, pos
