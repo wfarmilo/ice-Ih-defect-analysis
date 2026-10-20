@@ -18,6 +18,8 @@ from pathlib import Path
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+MAX_TASKS = 8
+
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
 def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, LIFETIME, RMAX):
 
@@ -25,28 +27,38 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
     dir_in = data_dir / input_formatted
 
-    traj_file = dir_in / f'traj-{dir_in.name}.dcd'
+    traj_file = dir_in / f'traj-{dir_in.name}.lammpstrj'
+    dcd_out = dir_in / f'traj-{dir_in.name}.dcd'
     HBN_save = out_dir_rich / f'{dir_in.name}-HBN.npz'
     df_save = out_dir_rich / f'{dir_in.name}-defects.npz'
 
+    # Callout before loading files
+    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
+
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and (HBN_save.exists() and df_save.exists()):
+    if not(is_run_all) and (HBN_save.exists() and df_save.exists() and dcd_out.exists()):
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
 
     # Set up simulation
-    u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'dcd')
+    u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'LAMMPSDUMP', lammps_coordinate_convention = "unwrapped")
     u.dimensions = cell_dims
     u.trajectory.add_transformations(trans.wrap(u.atoms, compound = 'atoms'))
 
     tis = np.arange(len(u.trajectory))
 
     # Track all defects
-    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
     df_dict, hbn_dict = run_multidefect_tracking(u, tis, LIFETIME, RMAX, isverbose = False, )
 
     # Save output
     np.savez_compressed(HBN_save, **hbn_dict)
     np.savez_compressed(df_save, **df_dict)
+
+    # Write dcd for other codes
+    print(dcd_out)
+    print(dcd_out.exists())
+    with mda.Writer(dcd_out.as_posix(), n_atoms = u.atoms.n_atoms) as w:
+        for ts in u.trajectory:
+            w.write(u.atoms)
 
     # Result is the diagnostic for printing from the executor
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
@@ -111,7 +123,7 @@ def main():
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
-    max_workers = np.min([tot_workers, 28])
+    max_workers = np.min([tot_workers, MAX_TASKS])
 
     with ProcessPoolExecutor(max_workers = max_workers) as executor:
         task_returns = [executor.submit(run_single_file, *tp) for tp in task_params]
