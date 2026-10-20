@@ -117,6 +117,10 @@ def fill_frame_positions(u, name, frames, atom1, atom2, MIDPOINT_DEFECT = ["L"])
     midpoint between atom1 and atom2 will be considered.
     """
 
+    # If given an empty array, return emptiness
+    if frames.size < 1:
+        return np.zeros(0, dtype = int), np.zeros((0,3))
+
     t0 = frames[0]
     tf = frames[-1]
     Nt = tf - t0
