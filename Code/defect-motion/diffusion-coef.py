@@ -2,11 +2,11 @@ import argparse
 from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
 
 def_keyfile = DATA_CACHE / "templates/CL-production.json"
-def_savefile = FIGS_CACHE / "CL-production/Diffusion-CL.svg"
+def_savefile = "CL-production/Diffusion-CL.svg"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
-parser.add_argument("-o", "--output", help = "Where to save figure", default = def_savefile, type = str)
+parser.add_argument("-o", "--output", help = "Name to give figure under FIGS_CACHE", default = def_savefile, type = str)
 
 args = parser.parse_args()
 
@@ -23,7 +23,7 @@ MIN_TAU = 50        # The minimum required max lag time (tau) for a run to contr
 def main():
 
     # Load input params
-    fig_savepath = Path(args.output).absolute()
+    fig_savepath = (FIGS_CACHE / args.output).absolute()
 
     # Load run info
     with open(args.from_file, "r") as f:
@@ -113,7 +113,9 @@ def main():
 
                     diff_dict[name]["dft"].append(dft)
 
-    #################### Plotting time ##########################################
+    make_plots(temps, diff_dict, DFTYPES)
+
+def make_plots(temps, diff_dict, DFTYPES):
     #Plot params
     plt.rcParams.update({
         "font.size": 18,
@@ -159,16 +161,23 @@ def main():
 
     def_markerparams = {'ms' : 12, 'mew' : 3, 'lw' : 3, 'capsize' : 4}
 
-    fig, axs = plt.subplots(2, 2, gridspec_kw={"wspace" : 0.15, "hspace" : 0.1, "left" : 0.15, "bottom" : 0.15})
+    fig, axs = plt.subplots(2, 2, layout = "constrained", sharey = "row", gridspec_kw={"wspace" : 0, "hspace" : 0.1})
     axs = axs.flatten()
-    for ax, name in zip(axs, DFTYPES):
+    orientation = np.arange(4).reshape((2,2))
+    for ai, (ax, name) in enumerate(zip(axs, DFTYPES)):
         ax.errorbar(temps, np.array(diff_dict[name]["avg"])*1e8, yerr = np.array(diff_dict[name]["std"])*1e8, fmt = '^-', c = clrs[name], **def_markerparams)
-        ax.set_ylabel(r"$D(T)$" + f" [{unitstring}]")
-        ax.set_xlabel(r"$T$ [K]")
+        # Add axis labels on edge axes
+        if ai in orientation[:, 0]: ax.set_ylabel(r"$D(T)$" + f" [{unitstring}]")
+        if ai in orientation[1, :]: ax.set_xlabel(r"$T$ [K]")
+
+        # Add defect type indicator
         ax.text(0.05, 0.95, dfnametolbl[name], color = clrs[name], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 21)
 
+    # Save figure
+    fig_savepath = (FIGS_CACHE / args.output).absolute()
     fig_savepath.parent.mkdir(parents = True, exist_ok = True)
     fig.savefig(fig_savepath)
+
 
 
 def weighted_msd_track_avg(tids, taus, msds):

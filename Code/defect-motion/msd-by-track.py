@@ -20,6 +20,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Which defects to use midpoint position for
 MIDPOINT_DEFECT = ["L"]
+MAX_WORKERS = 28
 
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
 def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, LIFETIME, RMAX):
@@ -31,6 +32,9 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
     df_path = out_dir_rich / f'{dir_in.name}-defects.npz'
     msd_savepath = out_dir_rich / f'{dir_in.name}-msd.npz'
+
+    # Sound off before waiting for file load times
+    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
 
     # If in update mode and all output files found, skip it
     if not(is_run_all) and msd_savepath.exists():
@@ -54,7 +58,6 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     msdsave = []
 
     # Find all msd's
-    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
 
     for type_code, name in enumerate(DFTYPES):
         mask_by_name = df_dict["type"] == type_code
@@ -158,7 +161,7 @@ def main():
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
-    max_workers = np.min([tot_workers, 28])
+    max_workers = np.min([tot_workers, MAX_WORKERS])
 
     with ProcessPoolExecutor(max_workers = max_workers) as executor:
         task_returns = [executor.submit(run_single_file, *tp) for tp in task_params]
