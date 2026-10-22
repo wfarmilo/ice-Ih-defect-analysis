@@ -1,12 +1,10 @@
 import argparse
-from icedfmods.Helper_modules import DATA_CACHE, FIGS_CACHE
+from icedfmods.Helper_modules import DATA_CACHE
 
-def_keyfile = DATA_CACHE / "templates/CL-production.json"
-def_savefile = "CL-production/Diffusion-CL.svg"
+def_keyfile = "CL-production.json"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
-parser.add_argument("-o", "--output", help = "Name to give figure under FIGS_CACHE", default = def_savefile, type = str)
+parser.add_argument("-i", "--input_files", action = "append", help = "Key file to read data from")
 
 args = parser.parse_args()
 
@@ -14,19 +12,21 @@ import json
 import numpy as np
 from pathlib import Path
 import re
-from matplotlib import pyplot as plt
 
 START = 4           # Start of diffusion fit window (ps)
 END = 20            # End of diffusion fit window (ps)
 MIN_TAU = 50        # The minimum required max lag time (tau) for a run to contribute to diffusion (ps)
 
 def main():
+    all_files = args.input_files if len(args.input_files) > 0 else def_keyfile
+    for file in all_files:
+        print(f"Starting {file}")
+        save_diffusion(DATA_CACHE / f"templates/{file}")
 
-    # Load input params
-    fig_savepath = (FIGS_CACHE / args.output).absolute()
+def save_diffusion(json_input_file):
 
     # Load run info
-    with open(args.from_file, "r") as f:
+    with open(json_input_file, "r") as f:
         runparams = json.loads(f.read())
 
     # Constant across all run types
@@ -48,22 +48,16 @@ def main():
 
     # Get output directory
     out_dir = DATA_CACHE / runparams["parent_folder"]
+    diff_saveloc = out_dir / "diffusion.npz"
 
-    # Prepare the inputs for each run
+    # All defect types list
+    DFTYPES = []
 
-    # Defect matching parameters
-    LIFETIME = runparams["defect_lifetime"]
-    RMAX = runparams["defect_maxjump"]
-
-    # All defect types, in the order as presented in Defect_tracking.py
-    DFTYPES = np.array(['OH', 'H3O', 'L', 'D'])
-    
-    # Build output dict
-    diff_dict = {name : {
-                        "avg" : [], 
-                        "std" : [], 
-                        "dft" : []
-                        } for name in DFTYPES}
+    # Build output lists
+    avgs = []
+    stds = []
+    dfts = []
+    types = []
 
     # Only take contributions from systems we expect to be relevant (maybe change this later?)
     contributors = {
@@ -87,12 +81,22 @@ def main():
 
                 msd_dict = np.load(msd_savepath)
 
-                assert (DFTYPES == msd_dict["type_names"]).all(), f"Wrong defect types {msd_dict["type_names"]} != {DFTYPES}"
+                # Initialize DFTYPES if not present, otherwise make sure it is consistent
+                if len(DFTYPES) > 0:
+                    assert (DFTYPES == msd_dict["type_names"]).all(), f"Wrong defect types {msd_dict["type_names"]} != {DFTYPES}"
+                else:
+                    DFTYPES = msd_dict["type_names"]
+
                 msd = {name : [] for name in DFTYPES}
                 diff = {name : np.nan for name in DFTYPES}
                 for name in DFTYPES:
                     mask_by_name = msd_dict["type"] == list(DFTYPES).index(name)
-                    msd[name], wsum = weighted_msd_track_avg(msd_dict["track_id"][mask_by_name], msd_dict["tau"][mask_by_name], msd_dict["msd"][mask_by_name])
+
+                    # If we have tracks from defect matching, weight those accordingly
+                    if "track_id" in msd_dict.keys():
+                        msd[name], wsum = weighted_msd_track_avg(msd_dict["track_id"][mask_by_name], msd_dict["tau"][mask_by_name], msd_dict["msd"][mask_by_name])
+                    else:
+                        msd[name] = msd_dict["msd"][mask_by_name]
 
                     # Watch out for empty values
                     if msd[name].size > 0:
@@ -103,82 +107,32 @@ def main():
                 diff_runs.append(diff)
 
             # Get average value and stderr of diffusion coefficient
-            for name in DFTYPES:
+            for type_code, name in enumerate(DFTYPES):
                 if dft in contributors[name]:
                     diff_by_run = [diff_runs[ri][name] for ri in range(len(run_idxs))]
                     Nvalid = len(diff_by_run) - np.count_nonzero(np.isnan(diff_by_run))
                     
-                    diff_dict[name]["avg"].append(np.nanmean(diff_by_run, axis = 0))
-                    diff_dict[name]["std"].append(np.nanstd(diff_by_run, axis = 0) / np.sqrt(Nvalid))
+                    avgs.append(np.nanmean(diff_by_run, axis = 0))
+                    stds.append(np.nanstd(diff_by_run, axis = 0, ddof = 1) / np.sqrt(Nvalid)) # ddof = 1 is Bessel correction (N-1)
 
-                    diff_dict[name]["dft"].append(dft)
+                    dfts.append(dft)
 
-    make_plots(temps, diff_dict, DFTYPES)
+                    types.append(type_code)
 
-def make_plots(temps, diff_dict, DFTYPES):
-    #Plot params
-    plt.rcParams.update({
-        "font.size": 18,
-        "axes.labelsize": 18,
-        "axes.titlesize": 21,
-        "axes.grid": True,
-        "axes.linewidth": 1.25,
-        "xtick.top": True,
-        "ytick.right": True,
-        "xtick.direction": "in",
-        "ytick.direction": "in",
-        "xtick.major.width": 1.25,
-        "ytick.major.width": 1.25,
-        "xtick.minor.width": 1.25,
-        "ytick.minor.width": 1.25,
-        "xtick.minor.visible": False,
-        "ytick.minor.visible": False,
-        "xtick.major.size": 5,
-        "ytick.major.size": 5,
-        "grid.linestyle": "dashed",
-        "grid.linewidth": 1,
-        "grid.alpha": 0.3,
-        "figure.figsize": (10, 8),
-        "legend.fontsize": 12,
-        "mathtext.default": "regular",
-    })
-
-    unitstring = r'$\times 10^{-8}$ m$^2$s$^{-1}$'
-
-    clrs = {
-        "OH" : np.array([221, 48, 37])/255, 
-        "L" : np.array([41, 52, 122])/255, 
-        "H3O" : np.array([145, 20, 73])/255, 
-        "D" : np.array([104, 31, 177])/255
+    # Refactor diff_dict into depth-1 dictionary with boolean lookups
+    diff_dict = {
+        "dt" : DT,
+        "run_name" : run_name,
+        "temps" : temps,
+        "type_names" : DFTYPES,
+        "type_codes" : types,
+        "avgs" : avgs,
+        "stds" : stds,
+        "run_types" : dfts
     }
 
-    dfnametolbl = {
-        "OH" : r"$OH^-$",
-        "L" : r"$L$", 
-        "H3O" : r"$H_3O^+$", 
-        "D" : r"$D$"
-    }
-
-    def_markerparams = {'ms' : 12, 'mew' : 3, 'lw' : 3, 'capsize' : 4}
-
-    fig, axs = plt.subplots(2, 2, layout = "constrained", sharey = "row", gridspec_kw={"wspace" : 0, "hspace" : 0.1})
-    axs = axs.flatten()
-    orientation = np.arange(4).reshape((2,2))
-    for ai, (ax, name) in enumerate(zip(axs, DFTYPES)):
-        ax.errorbar(temps, np.array(diff_dict[name]["avg"])*1e8, yerr = np.array(diff_dict[name]["std"])*1e8, fmt = '^-', c = clrs[name], **def_markerparams)
-        # Add axis labels on edge axes
-        if ai in orientation[:, 0]: ax.set_ylabel(r"$D(T)$" + f" [{unitstring}]")
-        if ai in orientation[1, :]: ax.set_xlabel(r"$T$ [K]")
-
-        # Add defect type indicator
-        ax.text(0.05, 0.95, dfnametolbl[name], color = clrs[name], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 21)
-
-    # Save figure
-    fig_savepath = (FIGS_CACHE / args.output).absolute()
-    fig_savepath.parent.mkdir(parents = True, exist_ok = True)
-    fig.savefig(fig_savepath)
-
-
+    # Save diff_dict (will also convert to numpy array which is nice)
+    np.savez(diff_saveloc, **diff_dict)
 
 def weighted_msd_track_avg(tids, taus, msds):
 
