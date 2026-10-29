@@ -110,11 +110,11 @@ def extend_all_frame_positions(u, name, frames, atom1, atom2):
 
 def fill_frame_positions(u, name, frames, atom1, atom2, MIDPOINT_DEFECT = ["L"]):
     """
-    Method to fill in frames where defects, and extract their positions when found.
-    Will extend the defect to fill between frames[0] and frames[-1], NOT the entire
-    universe trajectory. Will use atom1 positions for all defects, unless their name
-    is present in MIDPOINT_DEFECT (default ["L"]) in which case the pbc-aware 
-    midpoint between atom1 and atom2 will be considered.
+    Method to fill in frames where defects do not exist with their last known index, 
+    and extract their positions. Will extend the defect to fill between frames[0] 
+    and frames[-1], NOT the entire universe trajectory. Will use atom1 positions 
+    for all defects, unless their name is present in MIDPOINT_DEFECT (default ["L"]) 
+    in which case the pbc-aware midpoint between atom1 and atom2 will be considered.
     """
 
     # If given an empty array, return emptiness
