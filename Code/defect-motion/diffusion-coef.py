@@ -92,11 +92,14 @@ def save_diffusion(json_input_file):
                 for name in DFTYPES:
                     mask_by_name = msd_dict["type"] == list(DFTYPES).index(name)
 
+                    # Using masked FFT counts here
+                    msd[name], wsum = masked_msd_track_avg(msd_dict["tau"][mask_by_name], msd_dict["msd"][mask_by_name], msd_dict["counts"][mask_by_name])
+
                     # If we have tracks from defect matching, weight those accordingly
-                    if "track_id" in msd_dict.keys():
-                        msd[name], wsum = weighted_msd_track_avg(msd_dict["track_id"][mask_by_name], msd_dict["tau"][mask_by_name], msd_dict["msd"][mask_by_name])
-                    else:
-                        msd[name] = msd_dict["msd"][mask_by_name]
+                    #if "track_id" in msd_dict.keys():
+                    #    msd[name], wsum = weighted_msd_track_avg(msd_dict["track_id"][mask_by_name], msd_dict["tau"][mask_by_name], msd_dict["msd"][mask_by_name])
+                    #else:
+                    #    msd[name] = msd_dict["msd"][mask_by_name]
 
                     # Watch out for empty values
                     if msd[name].size > 0:
@@ -164,7 +167,30 @@ def weighted_msd_track_avg(tids, taus, msds):
 
     return msd_avg / wsum, wsum
 
+def masked_msd_track_avg(taus, msds, counts):
 
+    if taus.size == 0:
+        return np.zeros(0), np.zeros(0)
+
+    # Only take values where we found an MSD between t and t + m
+    valid = np.isfinite(msds) * (counts > 0)
+
+    # Set up output arrays
+    maxlen = taus.max() + 1
+    val = np.zeros(maxlen)
+    weight = np.zeros(maxlen)
+
+    # Pool across all tracks (add.at allows overlaps to sum multiple times)
+    np.add.at(val, taus[valid], msds[valid] * counts[valid])
+    
+    # Update weights in the same locations
+    np.add.at(weight, taus[valid], counts[valid])
+
+    # Apply weight, leaving in NaN for empty lag times
+    weighted_msd = np.full(maxlen, np.nan)
+    weighted_msd[weight > 0] = val[weight > 0] / weight[weight > 0]
+
+    return weighted_msd, weight
 
 def get_diffusion(msd, dt, start, end, min_tau):
 

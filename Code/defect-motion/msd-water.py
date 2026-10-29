@@ -10,7 +10,7 @@ parser.add_argument("-ff", "--from_file", help = "Key file to read data from", d
 args = parser.parse_args()
 
 import json
-from icedfmods.MSD_FFT import get_fft_msd, fill_frame_positions
+from icedfmods.Masked_MSD_FFT import masked_fft_msd, blank_frame_positions
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis import transformations as trans
@@ -29,6 +29,7 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     dir_in = data_dir / input_formatted
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
+    COM_file = out_dir_rich / f'{dir_in.name}-COM.npy'
     df_path = out_dir_rich / f'{dir_in.name}-defects.npz'
     msd_savepath = out_dir_rich / f'{dir_in.name}-msd.npz'
 
@@ -44,9 +45,24 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     u.dimensions = cell_dims
 
     # Get COM
-    COM = np.zeros((len(u.trajectory), 3))
-    for ti, ts in enumerate(u.trajectory):
-        COM[ti, :] = u.atoms.center_of_mass()
+    if COM_file.exists():
+        COM = np.load(COM_file)
+    else:
+        COM = np.zeros((len(u.trajectory), 3))
+        masses = u.atoms.masses
+        previous = u.atoms.positions.copy()
+        unwrapped = previous.copy()
+        for ti, ts in enumerate(u.trajectory):
+            dist = u.atoms.positions - previous
+            dist -= u.dimensions[:3] * np.rint(dist / u.dimensions[:3])
+
+            unwrapped += dist
+            
+            COM[ti, :] = (masses[:, None] * unwrapped).sum(axis = 0) / masses.sum()
+
+            previous = u.atoms.positions.copy()
+            
+        np.save(COM_file, COM)
 
     # Get all defect types
     df_dict = np.load(df_path)
@@ -61,14 +77,14 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
         mask_by_name = df_dict["type"] == type_code
 
         # Build continuous trajectory out of frames (use only first, so MIDPOINT_DEFECT = [""])
-        frames, positions = fill_frame_positions(u, name, df_dict["frame"][mask_by_name], df_dict["atom"][mask_by_name], df_dict["atom"][mask_by_name], [""])
+        frames, positions, frame_mask = blank_frame_positions(u, name, df_dict["frame"][mask_by_name], df_dict["atom"][mask_by_name], df_dict["atom"][mask_by_name], [""])
         pos_shifted = positions - COM[frames, :]
 
         # Skip empty results (single frame defects)
         if pos_shifted.shape[0] == 0:
             continue
 
-        msd = get_fft_msd(pos_shifted, unwrapped = False, box = u.dimensions[:3])
+        msd, counts = masked_fft_msd(pos_shifted, frame_mask, unwrap = True, box = cell_dims[:3])
 
         # Add total x,y,z contributions to msd save
         msd3d = np.sum(msd, axis = 1)
@@ -76,10 +92,10 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
         # Build huge list of individual values to compress to .npz
         t0 = frames[0]
         for tau, msdval in enumerate(msd3d):
-            msdsave.append((type_code, t0, tau, msdval))
+            msdsave.append((type_code, t0, tau, msdval, counts[tau]))
 
     # Unpack msdsave
-    type_codes, t0s, taus, msdval3d = zip(*msdsave) if msdsave else ([], [], [], [], [])
+    type_codes, t0s, taus, msdval3d, save_counts = zip(*msdsave) if msdsave else ([], [], [], [], [], [])
 
     # Build dict
     msd_dict = {
@@ -87,6 +103,7 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
         "t0" : np.array(t0s, dtype = int),
         "tau" : np.array(taus, dtype = int),
         "msd" : np.array(msdval3d, dtype = float),
+        "counts" : np.array(save_counts, dtype = int),
         "type_names" : DFTYPES
     }
     

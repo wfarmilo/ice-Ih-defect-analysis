@@ -97,6 +97,7 @@ def make_plots(diff_dicts, fig_savepath):
 
     # Create figure and axes
     fig, axs = plt.subplots(2, 2, layout = "constrained", sharey = "row", gridspec_kw={"wspace" : 0, "hspace" : 0.1})
+    all_temps = []
     axs = axs.flatten()
     orientation = np.arange(4).reshape((2,2))
     axnames = ['OH', 'H3O', 'L', 'D']
@@ -104,6 +105,7 @@ def make_plots(diff_dicts, fig_savepath):
     # For each run, plot data
     for di, diff_dict in enumerate(diff_dicts):
         DFTYPES = diff_dict["type_names"]
+        all_temps.extend(diff_dict["temps"])
         
         # Get run style from name (water/ice, GGA/hybrid, classical/PIMD)
         stylename, style = lineprops_from_run_name(diff_dict["run_name"])
@@ -130,6 +132,7 @@ def make_plots(diff_dicts, fig_savepath):
             ax.errorbar(diff_dict["temps"], np.array(diff_dict["avgs"][mask_by_name])*1e8, yerr = np.array(diff_dict["stds"][mask_by_name])*1e8, c = clrs[name], **markerparams)
             
     # Decorate axes
+    all_temps = np.sort(list(set(all_temps)))
     for ai, ax in enumerate(axs):
         axname = axnames[ai]
 
@@ -140,11 +143,13 @@ def make_plots(diff_dicts, fig_savepath):
         # Add defect type indicator
         ax.text(0.05, 0.95, dfnametolbl[axname], color = clrs[axname], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 21)
 
+        # Add x ticks from all temperatures observed
+        ax.set_xticks(all_temps, all_temps)
+
         # Add legend to D defect axis (least interesting)
         if ai == orientation[1, 1]:
             for si, (style, stylename) in enumerate(zip(styles, stylenames)):
                 ax.errorbar([], [], c = 'k', label = stylename, **style)
-            
             
             ax.legend()
 

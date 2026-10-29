@@ -6,11 +6,12 @@ def_keyfile = DATA_CACHE / "templates/CL-production.json"
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
 parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
+parser.add_argument("-c", "--com", action = "store_true", help = "Run only for center of mass calc")
 
 args = parser.parse_args()
 
 import json
-from icedfmods.MSD_FFT import get_fft_msd, fill_frame_positions
+from icedfmods.Masked_MSD_FFT import masked_fft_msd, blank_frame_positions
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis import transformations as trans
@@ -23,31 +24,53 @@ MIDPOINT_DEFECT = ["L"]
 MAX_WORKERS = 28
 
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
-def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, LIFETIME, RMAX):
+def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, is_com_run):
 
     inputmap = [dft, f"{run_num:02d}", T]
     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
     dir_in = data_dir / input_formatted
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
+    COM_file = out_dir_rich / f'{dir_in.name}-COM.npy'
     df_path = out_dir_rich / f'{dir_in.name}-defects.npz'
     msd_savepath = out_dir_rich / f'{dir_in.name}-msd.npz'
 
     # Sound off before waiting for file load times
-    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
+    print(f'Reading {dft}-{run_num:02d}/{dir_in.name}')
 
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and msd_savepath.exists():
+    if not(is_run_all) and msd_savepath.exists() and not(is_com_run):
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
 
     # Set up simulation
     u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'dcd')
     u.dimensions = cell_dims
 
+    # Sound off before after file load
+    print(f'Running {dft}-{run_num:02d}/{dir_in.name}')
+
     # Get COM
-    COM = np.zeros((len(u.trajectory), 3))
-    for ti, ts in enumerate(u.trajectory):
-        COM[ti, :] = u.atoms.center_of_mass()
+    if COM_file.exists() and not(is_com_run):
+        COM = np.load(COM_file)
+    else:
+        COM = np.zeros((len(u.trajectory), 3))
+        masses = u.atoms.masses
+        previous = u.atoms.positions.copy()
+        unwrapped = previous.copy()
+        for ti, ts in enumerate(u.trajectory):
+            dist = u.atoms.positions - previous
+            dist -= u.dimensions[:3] * np.rint(dist / u.dimensions[:3])
+
+            unwrapped += dist
+            
+            COM[ti, :] = (masses[:, None] * unwrapped).sum(axis = 0) / masses.sum()
+
+            previous = u.atoms.positions.copy()
+            
+        np.save(COM_file, COM)
+
+    if is_com_run:
+        return f'Loaded COM {dft}-{run_num:02d}/{dir_in.name}'
 
     # Get all defect types
     df_dict = np.load(df_path)
@@ -66,14 +89,14 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
             mask_by_tid = (df_dict["track_id"] == tid) * mask_by_name
 
             # Build continuous trajectory out of frames
-            frames, positions = fill_frame_positions(u, name, df_dict["frame"][mask_by_tid], df_dict["atom1"][mask_by_tid], df_dict["atom2"][mask_by_tid], MIDPOINT_DEFECT)
+            frames, positions, frame_mask = blank_frame_positions(u, name, df_dict["frame"][mask_by_tid], df_dict["atom1"][mask_by_tid], df_dict["atom2"][mask_by_tid], MIDPOINT_DEFECT)
             pos_shifted = positions - COM[frames, :]
 
             # Skip empty results (single frame defects)
             if pos_shifted.shape[0] == 0:
                 continue
 
-            msd = get_fft_msd(pos_shifted, unwrapped = False, box = u.dimensions[:3])
+            msd, counts = masked_fft_msd(pos_shifted, frame_mask, unwrap = True, box = cell_dims[:3])
 
             # Add total x,y,z contributions to msd save
             msd3d = np.sum(msd, axis = 1)
@@ -81,10 +104,10 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
             # Build huge list of individual values to compress to .npz
             t0 = frames[0]
             for tau, msdval in enumerate(msd3d):
-                msdsave.append((tid, type_code, t0, tau, msdval))
+                msdsave.append((tid, type_code, t0, tau, msdval, counts[tau]))
 
     # Refactor msd_dict- now contains each tid within the dftype, as well as a list of all tids under ["OH"]["track_ids"]
-    track_ids, type_codes, t0s, taus, msdval3d = zip(*msdsave) if msdsave else ([], [], [], [], [])
+    track_ids, type_codes, t0s, taus, msdval3d, countsave = zip(*msdsave) if msdsave else ([], [], [], [], [], [])
 
     # Build dict
     msd_dict = {
@@ -93,6 +116,7 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
         "t0" : np.array(t0s, dtype = int),
         "tau" : np.array(taus, dtype = int),
         "msd" : np.array(msdval3d, dtype = float),
+        "counts" : np.array(countsave, dtype = int),
         "type_names" : DFTYPES
     }
     
@@ -104,9 +128,6 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
 
 def main():
-
-    # Load input params
-    run_all = args.all
 
     # Load run info
     with open(args.from_file, "r") as f:
@@ -157,7 +178,7 @@ def main():
             # Continue iterating over dependents
             for T in temps:
                 # Save inputs for each given task
-                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all, LIFETIME, RMAX))
+                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, args.all, args.com))
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
