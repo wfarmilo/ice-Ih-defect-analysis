@@ -13,6 +13,7 @@ config/
 
 # Module stuff
 *.egg-info
+__init__.py
 
 # Scrap files
 test-*
