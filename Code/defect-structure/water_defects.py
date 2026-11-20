@@ -6,6 +6,7 @@ def_keyfile = DATA_CACHE / "templates/water-production.json"
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
 parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
+parser.add_argument("-hbn", "--hydrogen_bonds", action = "store_true", help = "Only get hydrogen bonds and not defect tracking")
 
 args = parser.parse_args()
 
@@ -14,13 +15,16 @@ import numpy as np
 import MDAnalysis as mda
 from MDAnalysis import transformations as trans
 from icedfmods.Defect_tracking import run_waterdefect_tracking
+from icedfmods.Cutoff_HBN import build_hbonds
 from pathlib import Path
 import re
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+MAX_NUM_WORKERS = 8
+
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
-def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all):
+def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, is_run_hbn):
 
     inputmap = [dft, f"{run_num:02d}", T]
     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
@@ -28,9 +32,10 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
 
     traj_file = dir_in / f'traj-{dir_in.name}.dcd'
     df_save = out_dir_rich / f'{dir_in.name}-defects.npz'
+    cHBN_save = out_dir_rich / f'{dir_in.name}-cutoff-HBN.npz'
 
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and df_save.exists():
+    if not(is_run_all) and df_save.exists() and not(is_run_hbn):
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
 
     # Set up simulation
@@ -40,12 +45,18 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
 
     tis = np.arange(len(u.trajectory))
 
-    # Track all defects
-    print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
-    df_dict = run_waterdefect_tracking(u, tis, isverbose = False)
+    if not(is_run_hbn):
 
-    # Save output
-    np.savez_compressed(df_save, **df_dict)
+        # Track all defects
+        print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
+        df_dict = run_waterdefect_tracking(u, tis, isverbose = False)
+
+        # Save output
+        np.savez_compressed(df_save, **df_dict)
+
+    print(f'Starting {dft}-{run_num:02d}/{dir_in.name} hbonds')
+    hbond_dict = build_hbonds(u)
+    np.savez_compressed(cHBN_save, **hbond_dict)
 
     # Result is the diagnostic for printing from the executor
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
@@ -54,6 +65,7 @@ def main():
 
     # Load input params
     run_all = args.all
+    run_hbn = args.hydrogen_bonds
 
     # Load run info
     with open(args.from_file, "r") as f:
@@ -102,11 +114,11 @@ def main():
             # Continue iterating over dependents
             for T in temps:
                 # Save inputs for each given task
-                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all))
+                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all, run_hbn))
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
-    max_workers = np.min([tot_workers, 28])
+    max_workers = np.min([tot_workers, MAX_NUM_WORKERS])
 
     with ProcessPoolExecutor(max_workers = max_workers) as executor:
         task_returns = [executor.submit(run_single_file, *tp) for tp in task_params]

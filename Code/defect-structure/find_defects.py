@@ -6,11 +6,13 @@ def_keyfile = DATA_CACHE / "templates/CL-production.json"
 parser = argparse.ArgumentParser()
 parser.add_argument("-a", "--all", action = "store_true", help = "Run for all systems")
 parser.add_argument("-ff", "--from_file", help = "Key file to read data from", default = def_keyfile, type = str)
+parser.add_argument("-hbc", "--hydrogen_bonds_cutoff", action = "store_true", help = "Only get cutoff hydrogen bond network and not defect tracking")
 
 args = parser.parse_args()
 
 import json
 from icedfmods.Defect_tracking import run_multidefect_tracking
+from icedfmods.Cutoff_HBN import build_hbonds
 import numpy as np
 import MDAnalysis as mda
 from MDAnalysis import transformations as trans
@@ -21,7 +23,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 MAX_TASKS = 8
 
 # Received from main: data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all
-def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, LIFETIME, RMAX):
+def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, runparams, is_run_all, is_run_hbn, LIFETIME, RMAX):
 
     inputmap = [dft, f"{run_num:02d}", T]
     input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
@@ -31,34 +33,47 @@ def run_single_file(data_dir, pdbin, out_dir_rich, dft, run_num, cell_dims, T, r
     dcd_out = dir_in / f'traj-{dir_in.name}.dcd'
     HBN_save = out_dir_rich / f'{dir_in.name}-HBN.npz'
     df_save = out_dir_rich / f'{dir_in.name}-defects.npz'
+    cHBN_save = out_dir_rich / f'{dir_in.name}-cutoff-HBN.npz'
 
     # Callout before loading files
     print(f'Starting {dft}-{run_num:02d}/{dir_in.name}')
 
     # If in update mode and all output files found, skip it
-    if not(is_run_all) and (HBN_save.exists() and df_save.exists() and dcd_out.exists()):
+    if not(is_run_all) and (HBN_save.exists() and df_save.exists() and dcd_out.exists()) and not(is_run_hbn):
         return f'{dft}-{run_num:02d}/{dir_in.name} skipped'
+    if not(is_run_all) and is_run_hbn and cHBN_save.exists():
+        return f'{dft}-{run_num:02d}/{dir_in.name} cHBN skipped'
+
+    # If not rerunning, use existing dcd file
+    if not(is_run_all) and dcd_out.exists():
+        u = mda.Universe(pdbin.absolute(), dcd_out.absolute(), format = 'DCD')
+    else:
+        u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'LAMMPSDUMP', lammps_coordinate_convention = "unwrapped")
 
     # Set up simulation
-    u = mda.Universe(pdbin.absolute(), traj_file.absolute(), format = 'LAMMPSDUMP', lammps_coordinate_convention = "unwrapped")
     u.dimensions = cell_dims
     u.trajectory.add_transformations(trans.wrap(u.atoms, compound = 'atoms'))
 
     tis = np.arange(len(u.trajectory))
 
-    # Track all defects
-    df_dict, hbn_dict = run_multidefect_tracking(u, tis, LIFETIME, RMAX, isverbose = False, )
+    if not(is_run_hbn):
 
-    # Save output
-    np.savez_compressed(HBN_save, **hbn_dict)
-    np.savez_compressed(df_save, **df_dict)
+        # Track all defects
+        df_dict, hbn_dict = run_multidefect_tracking(u, tis, LIFETIME, RMAX, isverbose = False, )
 
-    # Write dcd for other codes
-    print(dcd_out)
-    print(dcd_out.exists())
-    with mda.Writer(dcd_out.as_posix(), n_atoms = u.atoms.n_atoms) as w:
-        for ts in u.trajectory:
-            w.write(u.atoms)
+        # Save output
+        np.savez_compressed(HBN_save, **hbn_dict)
+        np.savez_compressed(df_save, **df_dict)
+
+        # Write dcd for other codes if in rerun mode or it doesnt exist
+        if not(dcd_out.exists()) or is_run_all:
+            with mda.Writer(dcd_out.as_posix(), n_atoms = u.atoms.n_atoms) as w:
+                for ts in u.trajectory:
+                    w.write(u.atoms)
+
+
+    hbond_dict = build_hbonds(u)
+    np.savez_compressed(cHBN_save, **hbond_dict)
 
     # Result is the diagnostic for printing from the executor
     return f'{dft}-{run_num:02d}/{dir_in.name} completed'
@@ -67,6 +82,7 @@ def main():
 
     # Load input params
     run_all = args.all
+    run_hbn = args.hydrogen_bonds_cutoff
 
     # Load run info
     with open(args.from_file, "r") as f:
@@ -119,7 +135,7 @@ def main():
             # Continue iterating over dependents
             for T in temps:
                 # Save inputs for each given task
-                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all, LIFETIME, RMAX))
+                task_params.append((data_dir, pdbin, out_dir_rich, dft, run_num, ref_dims, T, runparams, run_all, run_hbn, LIFETIME, RMAX))
 
     # Queue all processes
     tot_workers = np.prod([len(dftypes), len(run_idxs), len(temps)])
