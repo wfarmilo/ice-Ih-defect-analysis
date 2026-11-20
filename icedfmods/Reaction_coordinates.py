@@ -3,8 +3,16 @@ This module contains all the ways I get reaction coordinates from my data
 """
 
 import numpy as np
+import json
+from icedfmods.Helper_modules import DATA_CACHE
+import re
+import MDAnalysis as mda
+from MDAnalysis.analysis import distances as mddist
 
-def get_ionic_delta(u, idxs, HBN_row):
+KB = 1
+NBINS = 100
+
+def get_ionic_delta(u : mda.Universe, idxs, HBN_row):
 
     """
     Ionic reaction coordinates: 
@@ -37,6 +45,7 @@ def get_ionic_delta(u, idxs, HBN_row):
 
     #Get the distances from the coordinated Hs to their other oxygen pair
     O_pairs_all = HBN_row[1:3, Hs_rows].astype(int)
+    
     #Pick the non-defect oxygen per column
     is_donor_match = O_pairs_all[0] == dfidxs
     O_pairs = np.where(is_donor_match, O_pairs_all[1], O_pairs_all[0])
@@ -51,8 +60,8 @@ def get_ionic_delta(u, idxs, HBN_row):
     OO_dists = np.linalg.norm(OO_vecs, axis = -1)
 
     #Use abs for consistency since for OH will be +ve but H3O will be -ve (test this)
-    deltas = np.abs(OHdf_dists - OH_dists)
-    mindelt = np.argmin(deltas)
+    deltas = OHdf_dists - OH_dists
+    mindelt = np.argmin(np.abs(deltas))
 
     #Choose the O - H - O chain with the smallest delta (as in Markland/Marsalek)
     delta = (deltas[mindelt])
@@ -63,7 +72,7 @@ def get_ionic_delta(u, idxs, HBN_row):
 
     return delta, oosum
 
-def get_D_delta_atom(u, idxs, HBN_row):
+def get_D_delta_atom(u : mda.Universe, ti, idxs, prev_next_defect, HBN_dict):
     """
     This code measures the Bjerrum D reaction coordinate, defined by the the value
     cos(a1) - cos(a2), where a1 and a2 are the angles between the OO vector and both
@@ -89,25 +98,86 @@ def get_D_delta_atom(u, idxs, HBN_row):
     #No defects, no delta (D defect needs 2)
     if dfidxs.size < 2:
         return None, None    
+
+    # Load in relevant data
+    donor, accep, hyd = HBN_dict["donor"][ti], HBN_dict["accep"][ti], HBN_dict["hyd"][ti]
+    defect = idxs[0]
+    candidates = [idxs[1], *prev_next_defect]
+    box = u.dimensions[:3]
+
+    # Loop through candidates to find the best delta
+    alpha1, alpha2 = 100, -100     #Impossibly bad guesses
+    saved = False
+    for cand in set(candidates):
+        # If the candidate is invalid, skip
+        if cand < 0 or cand == defect:
+            continue
+
+        # Check if there is an hbond from candidate -> defect
+        bonded = ((donor == cand) * (accep == defect)).any()
+        if not bonded:
+            continue
+
+        # Get best angle across all hydrogens of each candidate
+        a1 = _closest_angle_by_hyd(u, box, hyd[donor == defect], defect, cand)
+        a2 = _closest_angle_by_hyd(u, box, hyd[donor == cand], cand, defect)
+
+        # If the resulting delta is our best option (closest to 0) save it
+        if not(saved) or np.abs(a1 - a2) < np.abs(alpha1 - alpha2):
+            alpha1 = a1
+            alpha2 = a2
+            saved = True
     
-    #Find bond from dfidxs[0] -> dfidxs[1] and vice versa
-    found_01 = (HBN_row[1, :] == dfidxs[0]) * (HBN_row[2, :] == dfidxs[1])
-    found_10 = (HBN_row[1, :] == dfidxs[1]) * (HBN_row[2, :] == dfidxs[0])
-
-    # Ensure there is only a single hydrogen pointing both ways
-    if not(found_01.sum() * found_10.sum() == 1):
+    # If we never saved anything, break out 
+    if not(saved):
         return None, None
-
-    #By construction, found_01 will be from O'H*
-    alpha1 = HBN_row[3, found_01][0]
-    alpha2 = HBN_row[3, found_10][0]
-
-    delta = (alpha1 - alpha2)
-    omega = (np.arccos(alpha1) + np.arccos(alpha2))
+    
+    # Return values
+    delta = alpha1 - alpha2
+    omega = np.arccos(alpha1) + np.arccos(alpha2)
 
     return delta, omega
 
-def get_D_delta_bond(u, start, idxs, HBNN, oxyNL):
+def _closest_angle_by_hyd(u : mda.Universe, box, hyds, Oa, Ob):
+    """
+    Computes the largest cosine projection of all hyds 
+    onto the Oa -> Ob vector
+    """
+    # Get unit OO vector
+    OO = u.atoms[Ob].position - u.atoms[Oa].position
+    OO -= box * np.rint(OO/box)
+    OO /= np.linalg.norm(OO)
+
+    # Get unit OH vectors
+    OH = u.atoms[hyds].positions - u.atoms[Oa].position
+    OH -= box*np.rint(OH/box)
+    OH /= np.linalg.norm(OH, axis = -1)[:, None]
+
+    # Compute projection
+    projs = np.sum(OO[None, :] * OH[:, :], axis = 1)
+    best_proj = np.max(projs)
+
+    # Make sure its in the correct range
+    best_proj = np.clip(best_proj, -1, 1)
+
+    return best_proj
+
+def next_D_by_track(frames, tracks, defects):
+    order = np.lexsort((frames, tracks))
+    next_D = np.full(len(defects), -1, dtype = int)
+
+    upcoming = -1
+    for k in range(len(order) - 2, -1, -1):
+        i, j = order[k], order[k+1]
+        if tracks[j] != tracks[i]:
+            upcoming = -1
+        elif defects[j] != defects[i]:
+            upcoming = defects[j]
+        next_D[i] = upcoming
+
+    return next_D
+
+def get_D_delta_bond(u : mda.Universe, start, idxs, HBNN, oxyNL):
     """
     TODO: Still uses legacy implementation doing loop inside fxn, maybe change this
 
@@ -208,7 +278,7 @@ def get_D_delta_bond(u, start, idxs, HBNN, oxyNL):
 
     return delta, omega
 
-def get_L_delta(u, idxs, HBN_row):
+def get_L_delta(u : mda.Universe, idxs, HBN_row):
     """
     This code measures the Bjerrum L reaction coordinate, defined by the the value
     cos(a1) - cos(a2), a1 is the angle between the incoming OH and the defect OO,
@@ -274,3 +344,109 @@ def get_L_delta(u, idxs, HBN_row):
     omega = (np.arccos(alpha1) + np.arccos(alpha2))
 
     return delta, omega
+
+def load_reaction_coords(json_input_file):
+
+    # Load run info
+    with open(json_input_file, "r") as f:
+        runparams = json.loads(f.read())
+
+    # Iterating variables
+    dftypes = runparams["defect_types"]
+    run_idxs = runparams["run_indices"]
+
+    # Use only defect systems
+    if "p0m0" in dftypes: dftypes.remove("p0m0")
+
+    # Simulation variables: not the main thing we want to converge, but different cases of it to compare over
+    temps = runparams["temperature"]
+
+    # Get output directory
+    out_dir = DATA_CACHE / runparams["parent_folder"]
+
+    deltas, omegas = [], []
+    type_codes, all_temps, sim_types, run_nums = [], [], [], []
+
+    for T in temps:
+        for dft in dftypes:
+            for run_num in run_idxs:
+                # Read parent directory (pxmY-ZZ)
+                out_dir_rich = out_dir / f"{dft}-{run_num:02d}"
+
+                # Get home directory from run params
+                inputmap = [dft, f"{run_num:02d}", T]
+                input_formatted = re.sub(r'XXX[^X]*XXX', '{}', runparams["input_fmt"]).format(*inputmap)
+                run_identifier = input_formatted.split('/')[-1]
+
+                coord_saveloc = out_dir_rich / f"{run_identifier}-delta-coord.npz"
+                sum_saveloc = out_dir_rich / f"{run_identifier}-summed-coord.npz"
+
+                delta = dict(np.load(coord_saveloc))
+                omega = dict(np.load(sum_saveloc))
+
+                DFTYPES = delta["type_names"]
+                for type_code, name in enumerate(DFTYPES):
+                    # How many values are there for delta & omega
+                    N = len(delta[name])
+                    deltas.append(delta[name])
+                    omegas.append(omega[name])
+
+                    # Fill corresponding params that many times
+                    all_temps.append(np.full(N, T))
+                    type_codes.append(np.full(N, type_code))
+                    sim_types.append(np.full(N, dft))
+                    run_nums.append(np.full(N, run_num))
+
+    coords = {
+        "input_name" : runparams["name"],
+        "type_names" : DFTYPES,
+        "unique_temps" : temps,
+        "delta" : np.concatenate(deltas),
+        "omega" : np.concatenate(omegas),
+        "type_code" : np.concatenate(type_codes),
+        "T" : np.concatenate(all_temps),
+        "simulation_type" : np.concatenate(sim_types),
+        "run_idx" : np.concatenate(run_nums)
+    }
+
+    return coords
+
+def get_free_1D(delta, bins, T):
+
+    # Get histogram from mirrored delta
+    mirrored = np.concatenate([-delta, delta])
+    hist, _ = np.histogram(mirrored, bins = bins)
+
+    # Get free energy
+    with np.errstate(divide='ignore', invalid = 'ignore'):  #Ignore warnings
+        free = - KB * T * np.log(hist / hist.sum())
+    finite = np.isfinite(free)
+
+    # Shift down by minimum (valid) value
+    free -= np.min(free[finite])
+
+    # Filter out infinities
+    free[np.logical_not(finite)] = np.nan
+
+    return free
+
+def get_free_2D(delta, omega, T, bins : list[np.ndarray]):
+
+    # Get histogram from mirrored delta (which means omega also must be mirrored)
+    mirrored_d = np.concatenate([-delta, delta])
+    mirrored_o = np.concatenate([omega, omega])
+
+    hist, _, _ = np.histogram2d(mirrored_d, mirrored_o, bins = bins)
+
+    # Get free energy
+    with np.errstate(divide='ignore', invalid = 'ignore'):  #Ignore warnings
+        free = - KB * T * np.log(hist / hist.sum())
+    finite = np.isfinite(free)
+
+    # Shift down by minimum (valid) value
+    free -= np.min(free[finite])
+
+    # Filter out infinities with blank colormap
+    free[np.logical_not(finite)] = np.nan
+
+    return free
