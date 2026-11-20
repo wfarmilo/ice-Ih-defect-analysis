@@ -91,12 +91,12 @@ def make_plots(diff_dicts, fig_savepath):
     }
 
     # Line style properties
-    def_markerparams = {'ms' : 12, 'mew' : 3, 'lw' : 3, 'capsize' : 4}
+    def_markerparams = {'ms' : 14, 'mew' : 4, 'lw' : 5, 'capsize' : 4}
     stylenames = []
     styles = []
 
     # Create figure and axes
-    fig, axs = plt.subplots(2, 2, layout = "constrained", sharey = "row", gridspec_kw={"wspace" : 0, "hspace" : 0.1})
+    fig, axs = plt.subplots(2, 2, layout = "constrained", sharey = "row", sharex = "col", gridspec_kw={"wspace" : 0, "hspace" : 0.1}, figsize = (8, 7))
     all_temps = []
     axs = axs.flatten()
     orientation = np.arange(4).reshape((2,2))
@@ -141,17 +141,25 @@ def make_plots(diff_dicts, fig_savepath):
         if ai in orientation[1, :]: ax.set_xlabel(r"$T$ [K]")
 
         # Add defect type indicator
-        ax.text(0.05, 0.95, dfnametolbl[axname], color = clrs[axname], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 21)
+        ax.text(0.05, 0.95, dfnametolbl[axname], color = clrs[axname], ha = 'left', va = 'top', transform = ax.transAxes, fontsize = 30)
+
+        # Add legend to D defect axis (least interesting)
+        if axname == "D":
+            for si, (style, stylename) in enumerate(zip(styles, stylenames)):
+                #ax.errorbar([], [], c = 'k', label = stylename, **style)
+                ax.errorbar([], [], c = 'k', label = ["Ice", "Water"][si], **style, **def_markerparams)
+            
+            ax.legend(fontsize = 20)
+
+        # Add annotation arrow to OH axis
+        if axname == "OH":
+            xpos = 275
+            ax.annotate("", ha = "left", xy = (xpos, 0.5), xytext = (xpos, 2.3), arrowprops = dict(arrowstyle = "<->", lw = 4, color = 'k'))
+            ax.text(xpos + 3, 1.5, r"$\Delta D_{ice,water}$", ha = "left")
 
         # Add x ticks from all temperatures observed
         ax.set_xticks(all_temps, all_temps)
-
-        # Add legend to D defect axis (least interesting)
-        if ai == orientation[1, 1]:
-            for si, (style, stylename) in enumerate(zip(styles, stylenames)):
-                ax.errorbar([], [], c = 'k', label = stylename, **style)
-            
-            ax.legend()
+        ax.tick_params(axis = "x", labelbottom = True)
 
     # Save figure
     fig_savepath.parent.mkdir(parents = True, exist_ok = True)
@@ -165,12 +173,12 @@ def lineprops_from_run_name(run_name):
     display_name = ""
 
     # Determine marker shape from level of theory (alternatively, marker orientation and type can be CL/PI)
-    if "hyb" in run_name:
-        markershape = "^"
-        display_name += "Hybrid "
+    if "water" in run_name:
+        markershape = "o"
+        display_name += "Water "
     else:
         markershape = "s"
-        display_name += "GGA "
+        display_name += "Ice "
 
     # Determine line style from MD type (CL/PI)
     if "PI" in run_name:
@@ -180,11 +188,11 @@ def lineprops_from_run_name(run_name):
         linestyle = "-"
         display_name += "CL "
 
-    # If water, rotate marker
-    if "water" in run_name:
+    # If hybrid, rotate marker
+    if "hyb" in run_name:
         if markershape == "^": markershape = "v"
         elif markershape == "s": markershape = "D"
-        display_name += "water"
+        display_name += "hybrid"
 
     return display_name, {'ls' : linestyle, 'marker' : markershape}
 
